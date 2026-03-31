@@ -77,43 +77,28 @@ st.set_page_config(
 st.markdown(
     f"""
     <style>
-        /* Main background */
         .stApp {{ background-color: {COLOR_BG}; color: {COLOR_TEXT}; }}
-
-        /* Sidebar */
         section[data-testid="stSidebar"] {{
             background-color: {COLOR_SURFACE};
             border-right: 1px solid {COLOR_ACCENT};
         }}
-
-        /* Block container */
         .block-container {{
             padding-top: 1.5rem;
             padding-bottom: 2rem;
         }}
-
-        /* Category buttons (tabs) */
         div[role="tablist"] button {{
             border-radius: 4px !important;
             font-weight: 600 !important;
             border: 1px solid #333 !important;
         }}
-
-        /* Metric cards */
         div[data-testid="stMetric"] {{
             background: {COLOR_SURFACE};
             border: 1px solid {COLOR_ACCENT};
             border-radius: 10px;
             padding: 12px;
         }}
-
-        /* Headers */
         h1, h2, h3 {{ color: {COLOR_ACCENT} !important; letter-spacing: -0.02em; }}
-
-        /* Selectbox / slider labels */
         label {{ color: {COLOR_MUTED} !important; }}
-
-        /* Custom Caption Card */
         .caption-card {{
             background: {COLOR_SURFACE};
             border: 1px solid {COLOR_ACCENT};
@@ -146,11 +131,9 @@ def parse_list_column(value: object) -> list[str]:
         pass
     return [part.strip() for part in text.split(",") if part.strip()]
 
-
 def safe_ratio(numerator: pd.Series, denominator: pd.Series) -> pd.Series:
     ratio = numerator.div(denominator.replace(0, np.nan))
     return ratio.replace([np.inf, -np.inf], np.nan)
-
 
 def categorize_era(year: float) -> str:
     if pd.isna(year):
@@ -162,7 +145,6 @@ def categorize_era(year: float) -> str:
     if year <= 2020:
         return "Modern (2011-2020)"
     return "Current (2021+)"
-
 
 def encode_source(source: object) -> str:
     if pd.isna(source):
@@ -178,7 +160,6 @@ def encode_source(source: object) -> str:
         return "Other Media"
     return "Other"
 
-
 def categorize_binge(hours: float) -> str:
     if pd.isna(hours) or hours <= 0:
         return "Unknown"
@@ -192,7 +173,6 @@ def categorize_binge(hours: float) -> str:
         return "Standard Series (13-50h)"
     return "Long Commitment (50+ h)"
 
-
 def build_numeric_trendline(df: pd.DataFrame, x_col: str, y_col: str, points: int = 100) -> pd.DataFrame:
     clean = df[[x_col, y_col]].dropna()
     if len(clean) < 2:
@@ -203,7 +183,6 @@ def build_numeric_trendline(df: pd.DataFrame, x_col: str, y_col: str, points: in
         return pd.DataFrame(columns=[x_col, y_col])
     x_values = np.linspace(clean[x_col].min(), clean[x_col].max(), points)
     return pd.DataFrame({x_col: x_values, y_col: slope * x_values + intercept})
-
 
 def build_log_trendline(df: pd.DataFrame, x_col: str, y_col: str, points: int = 100) -> pd.DataFrame:
     clean = df[[x_col, y_col]].dropna()
@@ -217,7 +196,6 @@ def build_log_trendline(df: pd.DataFrame, x_col: str, y_col: str, points: int = 
     x_values = np.geomspace(clean[x_col].min(), clean[x_col].max(), points)
     return pd.DataFrame({x_col: x_values, y_col: slope * np.log10(x_values) + intercept})
 
-
 def style_figure(fig):
     fig.update_layout(
         paper_bgcolor=COLOR_BG,
@@ -230,7 +208,6 @@ def style_figure(fig):
     fig.update_xaxes(showgrid=True, gridcolor="rgba(255,255,255,0.1)", zeroline=False)
     fig.update_yaxes(showgrid=True, gridcolor="rgba(255,255,255,0.1)", zeroline=False)
     return fig
-
 
 FEATURE_DEFINITIONS = pd.DataFrame(
     [
@@ -257,7 +234,6 @@ def load_data() -> pd.DataFrame:
 
     details = pd.read_csv(DETAILS_PATH)
     stats = pd.read_csv(STATS_PATH)
-
     df = details.merge(stats, on="mal_id", how="left", validate="one_to_one")
 
     numeric_cols = [
@@ -298,7 +274,6 @@ def load_data() -> pd.DataFrame:
 
     return df
 
-
 def build_scaled_dataframe(df_source: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
     scaled = df_source[columns].dropna().copy()
     if scaled.empty:
@@ -320,11 +295,7 @@ def build_scaled_dataframe(df_source: pd.DataFrame, columns: list[str]) -> pd.Da
 try:
     df = load_data()
 except Exception as exc:
-    st.error(
-        "Could not load `details.csv` and `stats.csv`. "
-        "Please check the `datasets/` folder and column names."
-    )
-    st.exception(exc)
+    st.error("Could not load dataset files. Please check the folder and names.")
     st.stop()
 
 # ─────────────────────────────────────────
@@ -345,6 +316,12 @@ def filter_dataframe(df_source: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, o
     with st.sidebar:
         st.title("🎌 MAL Dashboard")
         st.caption("Interactive exploration of the MyAnimeList dataset")
+        st.markdown("---")
+        
+        # O NOSSO NOVO CHECKBOX DE SEPARAÇÃO DA VISÃO
+        st.subheader("Modo de Visualização")
+        visao_dev = st.checkbox("🛠️ Ativar Visão Developer", value=False, help="Alterna para gráficos focados em análise estatística exploratória e normalização de dados.")
+
         st.markdown("---")
         st.subheader("Global Filters")
 
@@ -399,642 +376,246 @@ def filter_dataframe(df_source: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, o
         "include_unknown_year": include_unknown_year,
         "include_unscored": include_unscored,
         "all_genres_count": len(all_genres),
-    }
+    }, visao_dev
 
-filtered_df, controls = filter_dataframe(df)
+filtered_df, controls, visao_dev = filter_dataframe(df)
 scaled_df = build_scaled_dataframe(filtered_df, SCALING_COLUMNS)
-
-# ─────────────────────────────────────────
-#  HEADER & METRICS
-# ─────────────────────────────────────────
-st.title("🎌 MyAnimeList Data Exploration Dashboard")
-st.markdown(
-    """
-    <div class="caption-card">
-        Interactive dashboard based on the notebook's statistical analysis.
-        The sidebar filters affect all visualisations in real time.
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
-st.caption(f"Data source: `details.csv` + `stats.csv` merged by `mal_id` | Records loaded: {len(df):,}")
-st.caption("Method note: `year_clean` uses `year` when available and falls back to the year extracted from `start_date`.")
-
-metric_1, metric_2, metric_3, metric_4, metric_5 = st.columns(5)
-metric_1.metric("Filtered Animes", f"{len(filtered_df):,}")
-metric_2.metric("Avg Score", f"{filtered_df['score'].mean():.2f}" if filtered_df["score"].notna().any() else "N/A")
-metric_3.metric("Avg Episodes", f"{filtered_df['episodes'].mean():.1f}" if filtered_df["episodes"].notna().any() else "N/A")
-metric_4.metric("Avg Members", f"{filtered_df['members'].mean():,.0f}" if filtered_df["members"].notna().any() else "N/A")
-metric_5.metric("Available Genres", str(controls["all_genres_count"]))
 
 if filtered_df.empty:
     st.warning("No anime matches the current filters.")
     st.stop()
 
 # ─────────────────────────────────────────
-#  TABS
+#  CONDICIONAL DE RENDERIZAÇÃO: DEV vs USER
 # ─────────────────────────────────────────
-tab0, tab1, tab2, tab3, tab4, tab5 = st.tabs(
-    [
-        "Dataset Overview",
-        "📊 Distributions",
-        "🔗 Correlations",
-        "🏷️ Categorical Analysis",
-        "📈 Temporal Trends",
-        "💎 Engineered Features",
-    ]
-)
 
-# ══════════════════════════════════════════
-# TAB 1 — DISTRIBUTIONS
-# ══════════════════════════════════════════
-with tab0:
-    st.subheader("Dataset Characteristics")
-    overview_left, overview_right = st.columns(2)
+if visao_dev:
+    # ==========================================
+    # VISÃO DEVELOPER (ANÁLISE ESTATÍSTICA E QUALIDADE DE DADOS)
+    # ==========================================
+    st.title("🛠️ Technical & Statistical Analysis")
+    st.markdown(
+        """
+        <div class="caption-card">
+            <strong>Visão Dev:</strong> Dashboard focada na saúde dos dados, análise de variância, matrizes de correlação e validação dos modelos de normalização.
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    
+    # Dev Metrics
+    d1, d2, d3 = st.columns(3)
+    d1.metric("Linhas (Pós-Filtros)", f"{len(filtered_df):,}")
+    d2.metric("Total de Features", f"{df.shape[1]}")
+    d3.metric("Ficheiros Lidos", "details.csv + stats.csv")
 
-    with overview_left:
-        dataset_overview = pd.DataFrame(
-            [
-                {"Characteristic": "Domain", "Value": "Anime metadata and audience behaviour from MyAnimeList"},
-                {"Characteristic": "Files used", "Value": "details.csv + stats.csv"},
-                {"Characteristic": "Main entity", "Value": "Anime title identified by mal_id"},
-                {"Characteristic": "Rows after merge", "Value": f"{len(df):,}"},
-                {"Characteristic": "Columns after feature engineering", "Value": f"{df.shape[1]:,}"},
-                {"Characteristic": "Numeric examples", "Value": "score, members, favorites, episodes, completed"},
-                {"Characteristic": "Categorical examples", "Value": "type, source, Release_Era, Binge_Category"},
-                {"Characteristic": "List-like fields", "Value": "genres, studios, themes"},
-            ]
-        )
-        st.dataframe(dataset_overview, use_container_width=True, hide_index=True)
+    dev_tab1, dev_tab2, dev_tab3 = st.tabs(["📊 Dataset Quality", "📉 Distributions & Scaling", "🔗 Correlations & Stats"])
 
-    with overview_right:
-        missing_summary = pd.DataFrame(
-            {
-                "column": ["score", "year", "year_clean", "episodes", "members", "favorites"],
-                "missing_pct": [
-                    df["score"].isna().mean() * 100,
-                    df["year"].isna().mean() * 100,
-                    df["year_clean"].isna().mean() * 100,
-                    df["episodes"].isna().mean() * 100,
-                    df["members"].isna().mean() * 100,
-                    df["favorites"].isna().mean() * 100,
-                ],
-            }
-        )
-        fig = px.bar(
-            missing_summary,
-            x="column",
-            y="missing_pct",
-            title="Missing Values in Key Columns (%)",
-            color="missing_pct",
-            color_continuous_scale="Sunset",
-        )
-        st.plotly_chart(style_figure(fig), use_container_width=True)
+    with dev_tab1:
+        st.subheader("Dataset Characteristics & Missing Values")
+        overview_left, overview_right = st.columns(2)
 
-    st.subheader("Normalisation and Standardization")
-    st.caption("The charts below compare original distributions with Min-Max normalization and Z-score standardization for selected variables.")
-
-    scaling_options = [col for col in SCALING_COLUMNS if col in scaled_df.columns]
-    if scaled_df.empty or not scaling_options:
-        st.info("Not enough complete records are available to compute normalization and standardization with the current filters.")
-    else:
-        selected_scaling_feature = st.selectbox("Variable for scaling analysis", scaling_options)
-        scale_left, scale_mid, scale_right = st.columns(3)
-
-        with scale_left:
-            fig = px.histogram(
-                scaled_df,
-                x=selected_scaling_feature,
-                nbins=40,
-                title=f"Original: {selected_scaling_feature}",
-                color_discrete_sequence=[COLOR_ACCENT],
+        with overview_left:
+            dataset_overview = pd.DataFrame(
+                [
+                    {"Characteristic": "Domain", "Value": "Anime metadata and audience behaviour from MyAnimeList"},
+                    {"Characteristic": "Files used", "Value": "details.csv + stats.csv"},
+                    {"Characteristic": "Main entity", "Value": "Anime title identified by mal_id"},
+                    {"Characteristic": "Rows after merge", "Value": f"{len(df):,}"},
+                    {"Characteristic": "Columns after feature engineering", "Value": f"{df.shape[1]:,}"},
+                    {"Characteristic": "Numeric examples", "Value": "score, members, favorites, episodes, completed"},
+                    {"Characteristic": "Categorical examples", "Value": "type, source, Release_Era, Binge_Category"},
+                    {"Characteristic": "List-like fields", "Value": "genres, studios, themes"},
+                ]
             )
-            st.plotly_chart(style_figure(fig), use_container_width=True)
+            st.dataframe(dataset_overview, use_container_width=True, hide_index=True)
 
-        with scale_mid:
-            fig = px.histogram(
-                scaled_df,
-                x=f"{selected_scaling_feature}_minmax",
-                nbins=40,
-                title=f"Min-Max: {selected_scaling_feature}",
-                color_discrete_sequence=[COLOR_ACCENT_2],
+        with overview_right:
+            missing_summary = pd.DataFrame(
+                {
+                    "column": ["score", "year", "year_clean", "episodes", "members", "favorites"],
+                    "missing_pct": [
+                        df["score"].isna().mean() * 100,
+                        df["year"].isna().mean() * 100,
+                        df["year_clean"].isna().mean() * 100,
+                        df["episodes"].isna().mean() * 100,
+                        df["members"].isna().mean() * 100,
+                        df["favorites"].isna().mean() * 100,
+                    ],
+                }
             )
-            st.plotly_chart(style_figure(fig), use_container_width=True)
-
-        with scale_right:
-            fig = px.histogram(
-                scaled_df,
-                x=f"{selected_scaling_feature}_zscore",
-                nbins=40,
-                title=f"Z-Score: {selected_scaling_feature}",
-                color_discrete_sequence=[COLOR_ACCENT_3],
-            )
-            st.plotly_chart(style_figure(fig), use_container_width=True)
-
-        scaling_stats = pd.DataFrame(
-            [
-                {"Version": "Original", "Mean": scaled_df[selected_scaling_feature].mean(), "Variance": scaled_df[selected_scaling_feature].var()},
-                {"Version": "Min-Max", "Mean": scaled_df[f"{selected_scaling_feature}_minmax"].mean(), "Variance": scaled_df[f"{selected_scaling_feature}_minmax"].var()},
-                {"Version": "Z-Score", "Mean": scaled_df[f"{selected_scaling_feature}_zscore"].mean(), "Variance": scaled_df[f"{selected_scaling_feature}_zscore"].var()},
-            ]
-        )
-        st.dataframe(scaling_stats.round(4), use_container_width=True, hide_index=True)
-
-    with st.expander("Critical Analysis", expanded=False):
-        st.markdown(
-            """
-            - The dataset is rich but highly skewed, especially for popularity-related variables such as `members` and `favorites`.
-            - Missing values are relevant in `year`, so the fallback to `start_date` improves temporal analysis but should be interpreted as a preprocessing decision.
-            - Min-Max normalization compresses outliers, while Z-score standardization keeps relative distance better but does not remove skewness.
-            - Some engineered features are informative but type-sensitive. For example, `Completion_Ratio` tends to favour shorter formats such as movies.
-            - Estimated watch time is a proxy derived from type and episode count, so it should be treated as an analytical approximation rather than a ground-truth duration variable.
-            """
-        )
-
-with tab1:
-    st.subheader("Main Distributions")
-    col_a, col_b = st.columns(2)
-
-    with col_a:
-        score_view = filtered_df.dropna(subset=["score"])
-        if score_view.empty:
-            st.info("No scored anime are available for the current filters.")
-        else:
-            fig = px.histogram(
-                score_view,
-                x="score",
-                nbins=40,
-                title="Score Distribution",
-                color_discrete_sequence=[COLOR_ACCENT],
-            )
-            st.plotly_chart(style_figure(fig), use_container_width=True)
-
-    with col_b:
-        score_view = filtered_df.dropna(subset=["score"])
-        if score_view.empty:
-            st.info("No scored anime are available for the current filters.")
-        else:
-            fig = px.box(
-                score_view,
-                y="score",
-                title="Score Boxplot",
-                color_discrete_sequence=[COLOR_ACCENT_2],
-            )
-            st.plotly_chart(style_figure(fig), use_container_width=True)
-
-    col_c, col_d = st.columns(2)
-    with col_c:
-        episodes_view = filtered_df[(filtered_df["episodes"].notna()) & (filtered_df["episodes"] <= 200)]
-        if episodes_view.empty:
-            st.info("No anime with episode data up to 200 are available for the current filters.")
-        else:
-            fig = px.histogram(
-                episodes_view,
-                x="episodes",
-                nbins=50,
-                title="Episodes Distribution (trimmed to <= 200 for readability)",
-                color_discrete_sequence=[COLOR_ACCENT_2],
-            )
-            st.plotly_chart(style_figure(fig), use_container_width=True)
-
-    with col_d:
-        members_view = filtered_df.dropna(subset=["members"]).copy()
-        members_view = members_view[members_view["members"] > 0]
-        if members_view.empty:
-            st.info("No member-count data are available for the current filters.")
-        else:
-            members_view["log_members"] = np.log10(members_view["members"])
-            fig = px.histogram(
-                members_view,
-                x="log_members",
-                nbins=45,
-                title="Members Distribution (log10 scale)",
-                color_discrete_sequence=[COLOR_ACCENT_3],
-            )
-            fig.update_xaxes(
-                title="log10(Members)",
-                tickmode="array",
-                tickvals=[2, 3, 4, 5, 6, 7],
-                ticktext=["100", "1k", "10k", "100k", "1M", "10M"],
-            )
-            st.plotly_chart(style_figure(fig), use_container_width=True)
-
-    with st.expander("💡 Click for explanation", expanded=False):
-        st.markdown(
-            """
-            - **Score Distribution** shows how anime ratings are spread across the filtered dataset.
-            - **Score Boxplot** highlights median, quartiles, and potential outliers in ratings.
-            - **Episodes Distribution** is trimmed to anime with 200 episodes or fewer to avoid a few very long series dominating the chart.
-            - **Members Distribution** is plotted on `log10(members)` because popularity is highly skewed in this dataset.
-            """
-        )
-
-# ══════════════════════════════════════════
-# TAB 2 — CORRELATIONS
-# ══════════════════════════════════════════
-with tab2:
-    st.subheader("Relationships between numeric variables")
-
-    corr_cols = [
-        "score", "scored_by", "members", "favorites", "episodes",
-        "rank", "popularity", "watching", "completed", "dropped",
-    ]
-    corr_df = filtered_df[corr_cols].copy()
-    min_valid = max(25, int(len(filtered_df) * 0.1))
-    valid_corr_cols = [col for col in corr_cols if corr_df[col].notna().sum() >= min_valid]
-    corr_df = corr_df[valid_corr_cols]
-
-    if len(valid_corr_cols) >= 2 and corr_df.dropna(how="all").shape[0] >= 2:
-        corr = corr_df.corr(method="pearson", numeric_only=True)
-        heatmap = px.imshow(
-            corr.round(2),
-            title="Pearson Correlation Heatmap",
-            color_continuous_scale="RdBu_r",
-            zmin=-1,
-            zmax=1,
-            aspect="auto",
-        )
-        heatmap.update_traces(text=corr.round(2).values, texttemplate="%{text:.2f}")
-        st.plotly_chart(style_figure(heatmap), use_container_width=True)
-    else:
-        st.info("Not enough data to calculate correlation with the current filters.")
-
-    st.caption("Interpretation note: `rank` and `popularity` are inverted rankings, so lower values mean stronger positions.")
-
-    scatter_left, scatter_right = st.columns(2)
-
-    with scatter_left:
-        scatter_df = filtered_df.dropna(subset=["score", "members"]).copy()
-        scatter_df = scatter_df[scatter_df["members"] > 0]
-        if scatter_df.empty:
-            st.info("No valid data is available for the Score vs Members chart with the current filters.")
-        else:
-            scatter_df = scatter_df.sample(min(2000, len(scatter_df)), random_state=42)
-            fig = px.scatter(
-                scatter_df,
-                x="members",
-                y="score",
-                color="type",
-                hover_name="title",
-                title="Score vs Members",
-                opacity=0.55,
-                log_x=True,
-                color_discrete_sequence=px.colors.qualitative.Vivid
-            )
-            trend_df = build_log_trendline(scatter_df, "members", "score")
-            if not trend_df.empty:
-                fig.add_scatter(x=trend_df["members"], y=trend_df["score"], mode="lines", name="Trend", line=dict(color="#ffffff"))
-            st.plotly_chart(style_figure(fig), use_container_width=True)
-
-    with scatter_right:
-        scatter_df = filtered_df.dropna(subset=["score", "favorites"]).copy()
-        scatter_df = scatter_df[scatter_df["favorites"] > 0]
-        if scatter_df.empty:
-            st.info("No valid data is available for the Score vs Favorites chart with the current filters.")
-        else:
-            scatter_df = scatter_df.sample(min(2000, len(scatter_df)), random_state=42)
-            fig = px.scatter(
-                scatter_df,
-                x="favorites",
-                y="score",
-                color="type",
-                hover_name="title",
-                title="Score vs Favorites",
-                opacity=0.55,
-                log_x=True,
-                color_discrete_sequence=px.colors.qualitative.Vivid
-            )
-            trend_df = build_log_trendline(scatter_df, "favorites", "score")
-            if not trend_df.empty:
-                fig.add_scatter(x=trend_df["favorites"], y=trend_df["score"], mode="lines", name="Trend", line=dict(color="#ffffff"))
-            st.plotly_chart(style_figure(fig), use_container_width=True)
-
-    with st.expander("💡 Click for explanation", expanded=False):
-        st.markdown(
-            """
-            - **Pearson Correlation Heatmap** uses pairwise Pearson correlation, so each variable pair is computed using all rows available for that specific pair.
-            - This is more precise than dropping rows with missing values across all columns at once.
-            - **Score vs Members** explores whether more popular anime also tend to receive higher scores.
-            - **Score vs Favorites** helps compare appreciation and score at the same time.
-            - `rank` and `popularity` work in reverse order: a lower number means a stronger position, so negative correlations with score are expected and meaningful.
-            """
-        )
-
-# ══════════════════════════════════════════
-# TAB 3 — CATEGORICAL
-# ══════════════════════════════════════════
-with tab3:
-    st.subheader("Types, sources, genres and studios")
-    left, right = st.columns(2)
-
-    with left:
-        type_counts = filtered_df["type"].fillna("Unknown").value_counts().reset_index()
-        type_counts.columns = ["type", "count"]
-        if type_counts.empty:
-            st.info("No type information is available for the current filters.")
-        else:
             fig = px.bar(
-                type_counts.sort_values("count", ascending=False),
-                x="type",
-                y="count",
-                title="Distribution by Type",
-                color="count",
-                color_continuous_scale="Tealgrn",
-            )
-            st.plotly_chart(style_figure(fig), use_container_width=True)
-
-    with st.expander("💡 Click for explanation", expanded=False):
-        st.markdown(
-            """
-            - **Distribution by Type** compares the relative weight of TV, Movie, OVA and other formats in a clearer bar-chart view.
-            - **Top Genres** highlights the most frequent genres in the filtered sample.
-            - **Original Anime Source** groups source material into broader categories such as Printed Text or Original.
-            - **Top Studios by Average Score** compares studio quality while keeping the current filters active.
-            """
-        )
-
-    with right:
-        genres_expanded = filtered_df.explode("genres_list")
-        genres_expanded = genres_expanded[genres_expanded["genres_list"].notna() & (genres_expanded["genres_list"] != "")]
-        top_genres = genres_expanded["genres_list"].value_counts().head(controls["top_n"]).reset_index()
-        top_genres.columns = ["genre", "count"]
-        if top_genres.empty:
-            st.info("No genre information is available for the current filters.")
-        else:
-            fig = px.bar(
-                top_genres.sort_values("count"),
-                x="count",
-                y="genre",
-                orientation="h",
-                title=f"Top {controls['top_n']} Genres",
-                color="count",
-                color_continuous_scale="Purpor",
-            )
-            st.plotly_chart(style_figure(fig), use_container_width=True)
-
-    bottom_left, bottom_right = st.columns(2)
-
-    with bottom_left:
-        source_stats = (
-            filtered_df.groupby("Source_Material_Encoded")
-            .agg(count=("mal_id", "count"), avg_score=("score", "mean"))
-            .reset_index()
-            .sort_values("count", ascending=False)
-        )
-        if source_stats.empty:
-            st.info("No source information is available for the current filters.")
-        else:
-            fig = px.bar(
-                source_stats,
-                x="Source_Material_Encoded",
-                y="count",
-                color="avg_score",
-                title="Original Anime Source",
-                color_continuous_scale="Tealgrn",
-            )
-            st.plotly_chart(style_figure(fig), use_container_width=True)
-
-    with bottom_right:
-        studio_stats = (
-            filtered_df[filtered_df["primary_studio"] != "Unknown"]
-            .groupby("primary_studio")
-            .agg(count=("score", "count"), avg_score=("score", "mean"))
-            .reset_index()
-        )
-        studio_stats = studio_stats[studio_stats["count"] >= 10].sort_values("avg_score", ascending=False).head(controls["top_n"])
-        if studio_stats.empty:
-            st.info("Not enough studio data are available after filtering. Try broader filters.")
-        else:
-            fig = px.bar(
-                studio_stats.sort_values("avg_score"),
-                x="avg_score",
-                y="primary_studio",
-                orientation="h",
-                color="count",
-                title="Top Studios by Average Score",
+                missing_summary,
+                x="column",
+                y="missing_pct",
+                title="Missing Values in Key Columns (%)",
+                color="missing_pct",
                 color_continuous_scale="Sunset",
             )
             st.plotly_chart(style_figure(fig), use_container_width=True)
 
-# ══════════════════════════════════════════
-# TAB 4 — TRENDS
-# ══════════════════════════════════════════
-with tab4:
-    st.subheader("Evolution Over the Years")
+    with dev_tab2:
+        st.subheader("Main Feature Distributions")
+        col_a, col_b = st.columns(2)
+        with col_a:
+            score_view = filtered_df.dropna(subset=["score"])
+            fig = px.histogram(score_view, x="score", nbins=40, title="Score Distribution", color_discrete_sequence=[COLOR_ACCENT])
+            st.plotly_chart(style_figure(fig), use_container_width=True)
 
-    yearly = (
-        filtered_df.dropna(subset=["year_clean"])
-        .groupby("year_clean")
-        .agg(count=("mal_id", "count"), avg_score=("score", "mean"))
-        .reset_index()
-        .sort_values("year_clean")
+        with col_b:
+            fig = px.box(score_view, y="score", title="Score Boxplot (Outliers Analysis)", color_discrete_sequence=[COLOR_ACCENT_2])
+            st.plotly_chart(style_figure(fig), use_container_width=True)
+            
+        st.markdown("---")
+        st.subheader("Normalisation and Standardization (Data Pipeline)")
+        scaling_options = [col for col in SCALING_COLUMNS if col in scaled_df.columns]
+        if scaled_df.empty or not scaling_options:
+            st.info("Not enough complete records are available to compute normalization and standardization.")
+        else:
+            selected_scaling_feature = st.selectbox("Variable for scaling analysis", scaling_options)
+            scale_left, scale_mid, scale_right = st.columns(3)
+
+            with scale_left:
+                fig = px.histogram(scaled_df, x=selected_scaling_feature, nbins=40, title=f"Original: {selected_scaling_feature}", color_discrete_sequence=[COLOR_ACCENT])
+                st.plotly_chart(style_figure(fig), use_container_width=True)
+
+            with scale_mid:
+                fig = px.histogram(scaled_df, x=f"{selected_scaling_feature}_minmax", nbins=40, title=f"Min-Max: {selected_scaling_feature}", color_discrete_sequence=[COLOR_ACCENT_2])
+                st.plotly_chart(style_figure(fig), use_container_width=True)
+
+            with scale_right:
+                fig = px.histogram(scaled_df, x=f"{selected_scaling_feature}_zscore", nbins=40, title=f"Z-Score: {selected_scaling_feature}", color_discrete_sequence=[COLOR_ACCENT_3])
+                st.plotly_chart(style_figure(fig), use_container_width=True)
+
+            scaling_stats = pd.DataFrame(
+                [
+                    {"Version": "Original", "Mean": scaled_df[selected_scaling_feature].mean(), "Variance": scaled_df[selected_scaling_feature].var()},
+                    {"Version": "Min-Max", "Mean": scaled_df[f"{selected_scaling_feature}_minmax"].mean(), "Variance": scaled_df[f"{selected_scaling_feature}_minmax"].var()},
+                    {"Version": "Z-Score", "Mean": scaled_df[f"{selected_scaling_feature}_zscore"].mean(), "Variance": scaled_df[f"{selected_scaling_feature}_zscore"].var()},
+                ]
+            )
+            st.dataframe(scaling_stats.round(4), use_container_width=True, hide_index=True)
+
+    with dev_tab3:
+        st.subheader("Pearson Correlation Matrix")
+        corr_cols = ["score", "scored_by", "members", "favorites", "episodes", "rank", "popularity", "watching", "completed", "dropped"]
+        corr_df = filtered_df[corr_cols].copy()
+        min_valid = max(25, int(len(filtered_df) * 0.1))
+        valid_corr_cols = [col for col in corr_cols if corr_df[col].notna().sum() >= min_valid]
+        corr_df = corr_df[valid_corr_cols]
+
+        if len(valid_corr_cols) >= 2 and corr_df.dropna(how="all").shape[0] >= 2:
+            corr = corr_df.corr(method="pearson", numeric_only=True)
+            heatmap = px.imshow(corr.round(2), title="Correlation Heatmap", color_continuous_scale="RdBu_r", zmin=-1, zmax=1, aspect="auto")
+            heatmap.update_traces(text=corr.round(2).values, texttemplate="%{text:.2f}")
+            st.plotly_chart(style_figure(heatmap), use_container_width=True)
+        else:
+            st.info("Not enough data to calculate correlation.")
+
+else:
+    # ==========================================
+    # VISÃO UTILIZADOR (EXPLORAÇÃO INTERATIVA)
+    # ==========================================
+    st.title("🎌 MyAnimeList Exploration Dashboard")
+    st.markdown(
+        """
+        <div class="caption-card">
+            <strong>Visão Utilizador:</strong> Exploração dinâmica interativa focada nas tendências, estúdios e engagement da comunidade baseada nos filtros ativos na barra lateral.
+        </div>
+        """,
+        unsafe_allow_html=True,
     )
-    yearly["count_ma3"] = yearly["count"].rolling(window=3, min_periods=1).mean()
-    yearly["avg_score_ma3"] = yearly["avg_score"].rolling(window=3, min_periods=1).mean()
+    
+    # User Metrics
+    metric_1, metric_2, metric_3, metric_4, metric_5 = st.columns(5)
+    metric_1.metric("Filtered Animes", f"{len(filtered_df):,}")
+    metric_2.metric("Avg Score", f"{filtered_df['score'].mean():.2f}" if filtered_df["score"].notna().any() else "N/A")
+    metric_3.metric("Avg Episodes", f"{filtered_df['episodes'].mean():.1f}" if filtered_df["episodes"].notna().any() else "N/A")
+    metric_4.metric("Avg Members", f"{filtered_df['members'].mean():,.0f}" if filtered_df["members"].notna().any() else "N/A")
+    metric_5.metric("Available Genres", str(controls["all_genres_count"]))
 
-    left, right = st.columns(2)
+    user_tab1, user_tab2, user_tab3, user_tab4 = st.tabs(["🏷️ Categorical Insights", "📈 Temporal Trends", "💎 Engagement & Discovery", "🔎 Data Explorer"])
 
-    with left:
-        if yearly.empty:
-            st.info("No yearly data are available for the current filters.")
-        else:
-            fig = px.bar(
-                yearly,
-                x="year_clean",
-                y="count",
-                title="Number of Animes per Year",
-                color="count",
-                color_continuous_scale="Oranges",
-            )
-            fig.add_scatter(x=yearly["year_clean"], y=yearly["count_ma3"], mode="lines", name="3-year moving average", line=dict(color="#ffffff"))
+    with user_tab1:
+        st.subheader("Types, Sources, Genres and Studios")
+        left, right = st.columns(2)
+
+        with left:
+            type_counts = filtered_df["type"].fillna("Unknown").value_counts().reset_index()
+            type_counts.columns = ["type", "count"]
+            fig = px.bar(type_counts.sort_values("count", ascending=False), x="type", y="count", title="Distribution by Type", color="count", color_continuous_scale="Tealgrn")
+            st.plotly_chart(style_figure(fig), use_container_width=True)
+            
+            source_stats = filtered_df.groupby("Source_Material_Encoded").agg(count=("mal_id", "count"), avg_score=("score", "mean")).reset_index().sort_values("count", ascending=False)
+            fig2 = px.bar(source_stats, x="Source_Material_Encoded", y="count", color="avg_score", title="Original Anime Source", color_continuous_scale="Tealgrn")
+            st.plotly_chart(style_figure(fig2), use_container_width=True)
+
+        with right:
+            genres_expanded = filtered_df.explode("genres_list")
+            genres_expanded = genres_expanded[genres_expanded["genres_list"].notna() & (genres_expanded["genres_list"] != "")]
+            top_genres = genres_expanded["genres_list"].value_counts().head(controls["top_n"]).reset_index()
+            top_genres.columns = ["genre", "count"]
+            fig3 = px.bar(top_genres.sort_values("count"), x="count", y="genre", orientation="h", title=f"Top {controls['top_n']} Genres", color="count", color_continuous_scale="Purpor")
+            st.plotly_chart(style_figure(fig3), use_container_width=True)
+            
+            studio_stats = filtered_df[filtered_df["primary_studio"] != "Unknown"].groupby("primary_studio").agg(count=("score", "count"), avg_score=("score", "mean")).reset_index()
+            studio_stats = studio_stats[studio_stats["count"] >= 10].sort_values("avg_score", ascending=False).head(controls["top_n"])
+            fig4 = px.bar(studio_stats.sort_values("avg_score"), x="avg_score", y="primary_studio", orientation="h", color="count", title="Top Studios by Average Score", color_continuous_scale="Sunset")
+            st.plotly_chart(style_figure(fig4), use_container_width=True)
+
+    with user_tab2:
+        st.subheader("Evolution Over the Years")
+        yearly = filtered_df.dropna(subset=["year_clean"]).groupby("year_clean").agg(count=("mal_id", "count"), avg_score=("score", "mean")).reset_index().sort_values("year_clean")
+        yearly["count_ma3"] = yearly["count"].rolling(window=3, min_periods=1).mean()
+        yearly["avg_score_ma3"] = yearly["avg_score"].rolling(window=3, min_periods=1).mean()
+
+        left, right = st.columns(2)
+        with left:
+            fig = px.bar(yearly, x="year_clean", y="count", title="Number of Animes per Year", color="count", color_continuous_scale="Oranges")
+            fig.add_scatter(x=yearly["year_clean"], y=yearly["count_ma3"], mode="lines", name="3-year MA", line=dict(color="#ffffff"))
             st.plotly_chart(style_figure(fig), use_container_width=True)
 
-    with right:
-        if yearly.empty:
-            st.info("No yearly data are available for the current filters.")
-        else:
-            fig = px.line(
-                yearly,
-                x="year_clean",
-                y="avg_score",
-                markers=True,
-                title="Average Score per Year",
-                color_discrete_sequence=[COLOR_ACCENT],
-            )
-            fig.add_scatter(x=yearly["year_clean"], y=yearly["avg_score_ma3"], mode="lines", name="3-year moving average", line=dict(color="#ffffff"))
+        with right:
+            fig2 = px.line(yearly, x="year_clean", y="avg_score", markers=True, title="Average Score per Year", color_discrete_sequence=[COLOR_ACCENT])
+            fig2.add_scatter(x=yearly["year_clean"], y=yearly["avg_score_ma3"], mode="lines", name="3-year MA", line=dict(color="#ffffff"))
+            st.plotly_chart(style_figure(fig2), use_container_width=True)
+
+        era_stats = filtered_df.groupby("Release_Era").agg(count=("mal_id", "count"), avg_score=("score", "mean"), avg_members=("members", "mean")).reset_index()
+        era_stats["Release_Era"] = pd.Categorical(era_stats["Release_Era"], categories=ERA_ORDER, ordered=True)
+        fig3 = px.bar(era_stats.sort_values("Release_Era"), x="Release_Era", y="count", color="avg_score", title="Distribution by Release Era", color_continuous_scale="Sunsetdark", hover_data={"avg_members": ":,.0f"})
+        st.plotly_chart(style_figure(fig3), use_container_width=True)
+
+    with user_tab3:
+        st.subheader("Engagement & Discovery Plots")
+        scatter_left, scatter_right = st.columns(2)
+
+        with scatter_left:
+            scatter_df = filtered_df.dropna(subset=["score", "members"]).copy()
+            scatter_df = scatter_df[scatter_df["members"] > 0].sample(min(2000, len(scatter_df)), random_state=42)
+            fig = px.scatter(scatter_df, x="members", y="score", color="type", hover_name="title", title="Score vs Members", opacity=0.55, log_x=True, color_discrete_sequence=px.colors.qualitative.Vivid)
             st.plotly_chart(style_figure(fig), use_container_width=True)
 
-    era_stats = (
-        filtered_df.groupby("Release_Era")
-        .agg(count=("mal_id", "count"), avg_score=("score", "mean"), avg_members=("members", "mean"))
-        .reset_index()
-    )
-    era_stats["Release_Era"] = pd.Categorical(era_stats["Release_Era"], categories=ERA_ORDER, ordered=True)
-    era_stats = era_stats.sort_values("Release_Era")
-
-    if era_stats.empty:
-        st.info("No era data are available for the current filters.")
-    else:
-        fig = px.bar(
-            era_stats,
-            x="Release_Era",
-            y="count",
-            color="avg_score",
-            title="Distribution by Release Era",
-            color_continuous_scale="Sunsetdark",
-            hover_data={"avg_members": ":,.0f"},
-        )
-        st.plotly_chart(style_figure(fig), use_container_width=True)
-
-    with st.expander("💡 Click for explanation", expanded=False):
-        st.markdown(
-            """
-            - **Number of Animes per Year** tracks production volume over time.
-            - **Average Score per Year** shows how audience ratings evolve across release years.
-            - **Distribution by Release Era** groups anime into broader historical periods to make long-term comparison easier.
-            - The dashboard uses `year_clean`, which fills missing `year` values with the year extracted from `start_date`.
-            - White overlay lines show a 3-year moving average to reduce year-to-year noise.
-            """
-        )
-
-# ══════════════════════════════════════════
-# TAB 5 — NEW FEATURES
-# ══════════════════════════════════════════
-with tab5:
-    st.subheader("Features Derived from the Notebook")
-
-    feature_left, feature_right = st.columns(2)
-
-    with feature_left:
-        engagement_view = filtered_df.dropna(subset=["Engagement_Ratio"])
-        if engagement_view.empty:
-            st.info("No engagement-ratio data are available for the current filters.")
-        else:
-            fig = px.histogram(
-                engagement_view,
-                x="Engagement_Ratio",
-                nbins=40,
-                title="Engagement Ratio (Favorites / Members)",
-                color_discrete_sequence=[COLOR_ACCENT],
-            )
-            st.plotly_chart(style_figure(fig), use_container_width=True)
-
-    with st.expander("💡 Click for explanation", expanded=False):
-        st.markdown(
-            """
-            - **Engagement Ratio** estimates how many members marked an anime as favourite.
-            - **Drop Rate** estimates how many users dropped the anime relative to the total tracked audience.
-            - **Score vs Completion Ratio** compares perceived quality with finishing behaviour.
-            - **Binge-ability by Category** groups anime by estimated watch time to show how length relates to score and volume.
-            """
-        )
-
-    with feature_right:
-        drop_view = filtered_df.dropna(subset=["Drop_Rate"])
-        if drop_view.empty:
-            st.info("No drop-rate data are available for the current filters.")
-        else:
-            fig = px.histogram(
-                drop_view,
-                x="Drop_Rate",
-                nbins=40,
-                title="Drop Rate (Dropped / Total)",
-                color_discrete_sequence=[COLOR_ACCENT_2],
-            )
-            st.plotly_chart(style_figure(fig), use_container_width=True)
-
-    mid_left, mid_right = st.columns(2)
-
-    with mid_left:
-        feature_df = filtered_df.dropna(subset=["score", "Completion_Ratio"]).copy()
-        if feature_df.empty:
-            st.info("No valid data is available for the Score vs Completion Ratio chart with the current filters.")
-        else:
+        with scatter_right:
+            feature_df = filtered_df.dropna(subset=["score", "Completion_Ratio"]).copy()
             feature_df = feature_df.sample(min(2000, len(feature_df)), random_state=42)
-            fig = px.scatter(
-                feature_df,
-                x="Completion_Ratio",
-                y="score",
-                color="type",
-                hover_name="title",
-                opacity=0.55,
-                title="Score vs Completion Ratio",
-            )
-            trend_df = build_numeric_trendline(feature_df, "Completion_Ratio", "score")
-            if not trend_df.empty:
-                fig.add_scatter(x=trend_df["Completion_Ratio"], y=trend_df["score"], mode="lines", name="Trend", line=dict(color="#ffffff"))
-            st.plotly_chart(style_figure(fig), use_container_width=True)
+            fig2 = px.scatter(feature_df, x="Completion_Ratio", y="score", color="type", hover_name="title", opacity=0.55, title="Score vs Completion Ratio")
+            st.plotly_chart(style_figure(fig2), use_container_width=True)
 
-    with mid_right:
-        binge_stats = (
-            filtered_df.groupby("Binge_Category")
-            .agg(count=("mal_id", "count"), avg_score=("score", "mean"))
-            .reset_index()
-        )
-        binge_stats["Binge_Category"] = pd.Categorical(binge_stats["Binge_Category"], categories=BINGE_ORDER, ordered=True)
-        binge_stats = binge_stats.sort_values("Binge_Category")
-        if binge_stats.empty:
-            st.info("No binge-category data are available for the current filters.")
-        else:
-            fig = px.bar(
-                binge_stats,
-                x="Binge_Category",
-                y="count",
-                color="avg_score",
-                title="Binge-ability by Category",
-                color_continuous_scale="Mint",
-            )
-            st.plotly_chart(style_figure(fig), use_container_width=True)
-            st.caption("Estimated watch time is a proxy derived from anime type and episode count, not an official duration column.")
+    with user_tab4:
+        st.subheader("🔎 Data Explorer")
+        search = st.text_input("Search by title...", "")
+        default_columns = ["title", "type", "score", "episodes", "year_clean", "members", "Engagement_Ratio", "Completion_Ratio", "Drop_Rate", "Binge_Category"]
+        selected_columns = st.multiselect("Visible Columns", options=filtered_df.columns.tolist(), default=default_columns)
 
-    audience_states = filtered_df[["watching", "completed", "on_hold", "dropped", "plan_to_watch"]].sum().reset_index()
-    audience_states.columns = ["state", "users"]
-    if audience_states["users"].fillna(0).sum() == 0:
-        st.info("No audience-state data are available for the current filters.")
-    else:
-        fig = px.bar(
-            audience_states,
-            x="state",
-            y="users",
-            color="users",
-            title="Audience State Profile",
-            color_continuous_scale="Tealgrn",
-        )
-        st.plotly_chart(style_figure(fig), use_container_width=True)
+        explorer_df = filtered_df.copy()
+        if search:
+            explorer_df = explorer_df[explorer_df["title"].str.contains(search, case=False, na=False)]
+        if selected_columns:
+            explorer_df = explorer_df[selected_columns]
 
-    st.markdown("### 🔎 Data Explorer")
-    search = st.text_input("Search by title...", "")
-    default_columns = [
-        "title",
-        "type",
-        "score",
-        "episodes",
-        "year_clean",
-        "members",
-        "Engagement_Ratio",
-        "Completion_Ratio",
-        "Drop_Rate",
-        "Binge_Category",
-    ]
-    selected_columns = st.multiselect(
-        "Visible Columns",
-        options=filtered_df.columns.tolist(),
-        default=default_columns,
-    )
-
-    explorer_df = filtered_df.copy()
-    if search:
-        explorer_df = explorer_df[explorer_df["title"].str.contains(search, case=False, na=False)]
-    if selected_columns:
-        explorer_df = explorer_df[selected_columns]
-
-    st.dataframe(explorer_df.reset_index(drop=True), use_container_width=True, height=420)
-
-    st.caption(
-        "Note: `year_clean` combines the `year` column with the year extracted from `start_date` to reduce missing values."
-    )
-    with st.expander("Feature Definitions", expanded=False):
-        st.dataframe(FEATURE_DEFINITIONS, use_container_width=True, hide_index=True)
+        st.dataframe(explorer_df.reset_index(drop=True), use_container_width=True, height=420)
+        with st.expander("Feature Definitions", expanded=False):
+            st.dataframe(FEATURE_DEFINITIONS, use_container_width=True, hide_index=True)
 
 # ─────────────────────────────────────────
 #  FOOTER
