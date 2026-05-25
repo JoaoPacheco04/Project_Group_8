@@ -1,0 +1,13 @@
+pandas
+numpy
+scikit-learn
+optuna
+mlflow
+matplotlib
+seaborn
+plotly
+streamlit
+scipy
+joblib
+graphviz
+# scikit-surprise  # Optional challenge (requires C++ compiler to install on Python 3.13+)

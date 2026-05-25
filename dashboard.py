@@ -7,12 +7,13 @@ import numpy as np
 import pandas as pd
 import plotly.express as px
 import streamlit as st
-
+import joblib
 
 CURRENT_YEAR = 2026
 DATA_DIR = Path(__file__).resolve().parent / "datasets"
 DETAILS_PATH = DATA_DIR / "details.csv"
 STATS_PATH = DATA_DIR / "stats.csv"
+ARTIFACTS_DIR = Path(__file__).resolve().parent / "artifacts"
 
 # Dark Theme Colors
 COLOR_BG = "#0f0f1a"
@@ -51,6 +52,43 @@ DURATION_MAP = {
     "CM": 1,
     "PV": 2,
 }
+
+
+@st.cache_resource(show_spinner=False)
+def load_ml_artifacts():
+    """Load trained ML artifacts created by run_all.py, if they exist."""
+    paths = {
+        "score_model": ARTIFACTS_DIR / "best_score_model.pkl",
+        "classification_model": ARTIFACTS_DIR / "best_classification_model.pkl",
+        "classification_preprocess": ARTIFACTS_DIR / "preprocess_classification.pkl",
+        "feature_columns": ARTIFACTS_DIR / "training_feature_columns.json",
+    }
+    if not all(path.exists() for path in paths.values()):
+        return None
+
+    import json
+
+    with paths["feature_columns"].open("r", encoding="utf-8") as handle:
+        feature_columns = json.load(handle)
+
+    return {
+        "score_model": joblib.load(paths["score_model"]),
+        "classification_model": joblib.load(paths["classification_model"]),
+        "classification_preprocess": joblib.load(paths["classification_preprocess"]),
+        "feature_columns": feature_columns,
+    }
+
+
+def predict_score(model, input_dict: dict) -> float:
+    X = pd.DataFrame([input_dict])
+    return float(model.predict(X)[0])
+
+
+def classify_score(model, preprocess, input_dict: dict) -> int:
+    X = pd.DataFrame([input_dict])
+    X_proc = preprocess.transform(X)
+    return int(model.predict(X_proc)[0])
+
 
 TOP_STUDIOS = [
     "Madhouse",
@@ -534,7 +572,7 @@ else:
     metric_4.metric("Avg Members", f"{filtered_df['members'].mean():,.0f}" if filtered_df["members"].notna().any() else "N/A")
     metric_5.metric("Available Genres", str(controls["all_genres_count"]))
 
-    user_tab1, user_tab2, user_tab3, user_tab4 = st.tabs(["🏷️ Categorical Insights", "📈 Temporal Trends", "💎 Engagement & Discovery", "🔎 Data Explorer"])
+    user_tab1, user_tab2, user_tab3, user_tab4, user_tab5, user_tab6 = st.tabs(["🏷️ Categorical Insights", "📈 Temporal Trends", "💎 Engagement & Discovery", "🔎 Data Explorer", "🔮 Predict Score", "🔎 Classify Score"])
 
     with user_tab1:
         st.subheader("Types, Sources, Genres and Studios")
@@ -616,6 +654,69 @@ else:
         st.dataframe(explorer_df.reset_index(drop=True), use_container_width=True, height=420)
         with st.expander("Feature Definitions", expanded=False):
             st.dataframe(FEATURE_DEFINITIONS, use_container_width=True, hide_index=True)
+
+    ml_bundle = load_ml_artifacts()
+
+    # ---- Prediction Tab -----------------------------------------------------------
+    with user_tab5:
+        st.subheader("🔮 Anime Score Prediction")
+        if ml_bundle is None:
+            st.info("Run `python run_all.py` to train and export the dashboard prediction artifacts.")
+        else:
+            regression_features = ml_bundle["feature_columns"]["regression_features"]
+            prediction_source = filtered_df.dropna(subset=["title"]).copy()
+            selected_title = st.selectbox(
+                "Base anime",
+                prediction_source["title"].sort_values().unique(),
+                key="score_prediction_title",
+            )
+            selected_row = prediction_source[prediction_source["title"] == selected_title].iloc[0]
+            input_data = {feature: selected_row.get(feature, np.nan) for feature in regression_features}
+
+            numeric_features = [feature for feature in regression_features if feature in df.columns and pd.api.types.is_numeric_dtype(df[feature])]
+            editable_features = [feature for feature in ["episodes", "members", "favorites", "rank", "popularity", "scored_by"] if feature in numeric_features]
+
+            cols = st.columns(3)
+            for idx, feature in enumerate(editable_features):
+                value = input_data.get(feature, 0)
+                value = 0.0 if pd.isna(value) else float(value)
+                input_data[feature] = cols[idx % 3].number_input(feature, value=value, step=1.0)
+
+            if st.button("Predict Score", key="predict_score_button"):
+                try:
+                    pred = predict_score(ml_bundle["score_model"], input_data)
+                    st.success(f"Predicted score: {pred:.2f}")
+                except Exception as exc:
+                    st.error(f"Prediction failed: {exc}")
+
+    with user_tab6:
+        st.subheader("High Score Classification")
+        if ml_bundle is None:
+            st.info("Run `python run_all.py` to train and export the dashboard classification artifacts.")
+        else:
+            classification_features = ml_bundle["feature_columns"]["classification_features"]
+            class_source = filtered_df.dropna(subset=["title"]).copy()
+            selected_title = st.selectbox(
+                "Base anime",
+                class_source["title"].sort_values().unique(),
+                key="class_prediction_title",
+            )
+            selected_row = class_source[class_source["title"] == selected_title].iloc[0]
+            input_data = {feature: selected_row.get(feature, np.nan) for feature in classification_features}
+
+            if st.button("Classify Score", key="classify_score_button"):
+                try:
+                    pred_class = classify_score(
+                        ml_bundle["classification_model"],
+                        ml_bundle["classification_preprocess"],
+                        input_data,
+                    )
+                    label = "high score (>= 8)" if pred_class == 1 else "lower score (< 8)"
+                    st.success(f"Predicted class: {label}")
+                except Exception as exc:
+                    st.error(f"Classification failed: {exc}")
+
+    # ---------------------------------------------------------------
 
 # ─────────────────────────────────────────
 #  FOOTER
