@@ -10,7 +10,6 @@ import numpy as np
 import pandas as pd
 from sklearn.model_selection import cross_val_score, train_test_split
 from sklearn.pipeline import Pipeline
-from sklearn.svm import SVR
 from sklearn.tree import plot_tree
 
 from src.clustering import optimal_k_elbow, plot_dendrogram, run_hierarchical, run_kmeans
@@ -23,7 +22,7 @@ from src.evaluate import (
     plot_regression_metrics,
 )
 from src.export_rf_tree import export_random_forest_tree
-from src.hyperopt import grid_search, optuna_study
+from src.hyperopt import greedy_search, grid_search, optuna_study
 from src.models import get_models
 from src.pca_svd import apply_pca
 from src.preprocessing import build_preprocess
@@ -72,14 +71,27 @@ def make_pipeline(df, target, model):
 
 
 def plot_alpha_analysis(df_alpha, model_name, metric_name, output_path):
-    plt.figure(figsize=(8, 5))
-    plt.plot(df_alpha["alpha"], df_alpha[metric_name], marker="o")
+    df_alpha = df_alpha.sort_values("alpha")
+    best_row = df_alpha.loc[df_alpha[metric_name].idxmin()]
+
+    plt.figure(figsize=(10, 6))
+    plt.plot(df_alpha["alpha"], df_alpha[metric_name], marker="o", linewidth=2.2)
+    plt.scatter(best_row["alpha"], best_row[metric_name], s=90, zorder=3, label="Best RMSE")
+    plt.annotate(
+        f"best alpha={best_row['alpha']:g}\n{metric_name.upper()}={best_row[metric_name]:.4f}",
+        xy=(best_row["alpha"], best_row[metric_name]),
+        xytext=(10, 12),
+        textcoords="offset points",
+        fontsize=9,
+    )
     plt.xscale("log")
     plt.title(f"{model_name} alpha analysis")
     plt.xlabel("alpha")
     plt.ylabel(metric_name.upper())
+    plt.grid(True, which="both", linestyle="--", alpha=0.35)
+    plt.legend()
     plt.tight_layout()
-    plt.savefig(output_path)
+    plt.savefig(output_path, dpi=160)
     plt.close()
 
 
@@ -270,25 +282,72 @@ def main():
         )
         mlflow.log_artifact(knn_summary_path)
 
-    with mlflow.start_run(run_name="optuna_search"):
-        best_rf = optuna_study(make_pipeline(df, target, models["RandomForest"]), X_train_df, y_train, n_trials=30)
-        evaluate_model("RF_optuna", best_rf, X_test_df, y_test)
+    best_score_model = None
+    best_score_rmse = np.inf
 
-        best_svr = optuna_study(make_pipeline(df, target, SVR(kernel="rbf")), X_train_df, y_train, n_trials=30)
-        svr_opt_metrics = evaluate_model("SVR_optuna", best_svr, X_test_df, y_test)
+    with mlflow.start_run(run_name="greedy_search_regression"):
+        greedy_regression_results = []
+        for name, model in models.items():
+            tuned_model, search_info = greedy_search(
+                make_pipeline(df, target, model),
+                X_train_df,
+                y_train,
+                cv=3,
+                scoring="neg_mean_squared_error",
+            )
+            metrics = evaluate_model(f"{name}_greedy", tuned_model, X_test_df, y_test)
+            greedy_regression_results.append(
+                {
+                    "model": name,
+                    "search": "greedy",
+                    "best_cv_score": search_info["best_score"],
+                    "best_params": json.dumps(json_safe(search_info["best_params"])),
+                    **metrics,
+                }
+            )
+            if metrics["rmse"] < best_score_rmse:
+                best_score_rmse = metrics["rmse"]
+                best_score_model = tuned_model
 
-        best_mlp = optuna_study(make_pipeline(df, target, models["MLP_multi"]), X_train_df, y_train, n_trials=30)
-        evaluate_model("MLP_optuna", best_mlp, X_test_df, y_test)
+        greedy_regression_df = pd.DataFrame(greedy_regression_results).sort_values("rmse")
+        greedy_regression_path = os.path.join(ARTIFACTS_DIR, "greedy_regression_results.csv")
+        greedy_regression_df.to_csv(greedy_regression_path, index=False)
+        mlflow.log_artifact(greedy_regression_path)
 
-        svr_summary_path = os.path.join(ARTIFACTS_DIR, "svr_optuna_summary.json")
-        save_json(
-            svr_summary_path,
-            {
-                "best_params": json_safe(best_svr.get_params(deep=False)),
-                "metrics": json_safe(svr_opt_metrics),
-            },
-        )
-        mlflow.log_artifact(svr_summary_path)
+    with mlflow.start_run(run_name="optuna_search_regression"):
+        optuna_regression_results = []
+        for name, model in models.items():
+            tuned_model, search_info = optuna_study(
+                make_pipeline(df, target, model),
+                X_train_df,
+                y_train,
+                n_trials=30,
+                cv=3,
+                scoring="neg_mean_squared_error",
+            )
+            metrics = evaluate_model(f"{name}_optuna", tuned_model, X_test_df, y_test)
+            optuna_regression_results.append(
+                {
+                    "model": name,
+                    "search": "optuna",
+                    "best_cv_score": search_info["best_score"],
+                    "best_params": json.dumps(json_safe(search_info["best_params"])),
+                    **metrics,
+                }
+            )
+            if metrics["rmse"] < best_score_rmse:
+                best_score_rmse = metrics["rmse"]
+                best_score_model = tuned_model
+
+        optuna_regression_df = pd.DataFrame(optuna_regression_results).sort_values("rmse")
+        optuna_regression_path = os.path.join(ARTIFACTS_DIR, "optuna_regression_results.csv")
+        optuna_regression_df.to_csv(optuna_regression_path, index=False)
+        mlflow.log_artifact(optuna_regression_path)
+
+    if best_score_model is None:
+        fallback_name = baseline_df.iloc[0]["model"]
+        best_score_model = make_pipeline(df, target, models[fallback_name])
+        best_score_model.fit(X_train_df, y_train)
 
     X_train_red, svd = apply_pca(X_train, variance=0.95)
     X_test_red = svd.transform(X_test)
@@ -426,6 +485,80 @@ def main():
         plot_fit_times(class_df, class_fit_time_plot_path)
         mlflow.log_artifact(class_fit_time_plot_path)
         mlflow.set_tag("best_model_classification", class_df.iloc[0]["model"])
+
+    best_classifier_model = clf_models[class_df.iloc[0]["model"]]
+    best_classifier_f1 = float(class_df.iloc[0]["f1"])
+
+    with mlflow.start_run(run_name="greedy_search_classification"):
+        greedy_classification_results = []
+        for name, model in get_models("classification").items():
+            tuned_model, search_info = greedy_search(
+                Pipeline(
+                    [
+                        ("preprocess", build_preprocess(df_class.drop(columns=["score"]), class_target)),
+                        ("model", model),
+                    ]
+                ),
+                X_class_df,
+                y_class,
+                cv=3,
+                scoring="f1",
+            )
+            preds = tuned_model.predict(Xc_test_df)
+            metrics = compute_classification_metrics(yc_test, preds)
+            greedy_classification_results.append(
+                {
+                    "model": name,
+                    "search": "greedy",
+                    "best_cv_score": search_info["best_score"],
+                    "best_params": json.dumps(json_safe(search_info["best_params"])),
+                    **metrics,
+                }
+            )
+            if metrics["f1"] > best_classifier_f1:
+                best_classifier_f1 = metrics["f1"]
+                best_classifier_model = tuned_model
+
+        greedy_classification_df = pd.DataFrame(greedy_classification_results).sort_values("f1", ascending=False)
+        greedy_classification_path = os.path.join(ARTIFACTS_DIR, "greedy_classification_results.csv")
+        greedy_classification_df.to_csv(greedy_classification_path, index=False)
+        mlflow.log_artifact(greedy_classification_path)
+
+    with mlflow.start_run(run_name="optuna_search_classification"):
+        optuna_classification_results = []
+        for name, model in get_models("classification").items():
+            tuned_model, search_info = optuna_study(
+                Pipeline(
+                    [
+                        ("preprocess", build_preprocess(df_class.drop(columns=["score"]), class_target)),
+                        ("model", model),
+                    ]
+                ),
+                X_class_df,
+                y_class,
+                n_trials=30,
+                cv=3,
+                scoring="f1",
+            )
+            preds = tuned_model.predict(Xc_test_df)
+            metrics = compute_classification_metrics(yc_test, preds)
+            optuna_classification_results.append(
+                {
+                    "model": name,
+                    "search": "optuna",
+                    "best_cv_score": search_info["best_score"],
+                    "best_params": json.dumps(json_safe(search_info["best_params"])),
+                    **metrics,
+                }
+            )
+            if metrics["f1"] > best_classifier_f1:
+                best_classifier_f1 = metrics["f1"]
+                best_classifier_model = tuned_model
+
+        optuna_classification_df = pd.DataFrame(optuna_classification_results).sort_values("f1", ascending=False)
+        optuna_classification_path = os.path.join(ARTIFACTS_DIR, "optuna_classification_results.csv")
+        optuna_classification_df.to_csv(optuna_classification_path, index=False)
+        mlflow.log_artifact(optuna_classification_path)
 
     with mlflow.start_run(run_name="cross_validation_classification"):
         cv_class_results = []
@@ -570,14 +703,13 @@ def main():
     joblib.dump(preprocess, os.path.join(ARTIFACTS_DIR, "preprocess.pkl"))
     joblib.dump(preprocess_class, os.path.join(ARTIFACTS_DIR, "preprocess_classification.pkl"))
 
-    if not isinstance(best_rf, Pipeline) or "preprocess" not in best_rf.named_steps:
-        base_rf = best_rf.named_steps["model"] if isinstance(best_rf, Pipeline) else best_rf
-        best_rf = make_pipeline(df, target, base_rf)
-        best_rf.fit(X_train_df, y_train)
+    if not isinstance(best_score_model, Pipeline) or "preprocess" not in best_score_model.named_steps:
+        base_model = best_score_model.named_steps["model"] if isinstance(best_score_model, Pipeline) else best_score_model
+        best_score_model = make_pipeline(df, target, base_model)
+        best_score_model.fit(X_train_df, y_train)
 
-    joblib.dump(best_rf, os.path.join(ARTIFACTS_DIR, "best_score_model.pkl"))
-    best_classifier = clf_models[class_df.iloc[0]["model"]]
-    joblib.dump(best_classifier, os.path.join(ARTIFACTS_DIR, "best_classification_model.pkl"))
+    joblib.dump(best_score_model, os.path.join(ARTIFACTS_DIR, "best_score_model.pkl"))
+    joblib.dump(best_classifier_model, os.path.join(ARTIFACTS_DIR, "best_classification_model.pkl"))
 
     feature_columns_path = os.path.join(ARTIFACTS_DIR, "training_feature_columns.json")
     save_json(
@@ -596,8 +728,8 @@ def main():
         mlflow.log_artifact(feature_columns_path)
 
         try:
-            rf_model = best_rf.named_steps["model"]
-            rf_feature_names = best_rf.named_steps["preprocess"].get_feature_names_out()
+            rf_model = best_score_model.named_steps["model"]
+            rf_feature_names = best_score_model.named_steps["preprocess"].get_feature_names_out()
             export_random_forest_tree(
                 rf_model,
                 os.path.join(REPORTS_DIR, "rf_tree.dot"),

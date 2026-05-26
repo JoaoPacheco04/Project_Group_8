@@ -56,27 +56,36 @@ DURATION_MAP = {
 
 @st.cache_resource(show_spinner=False)
 def load_ml_artifacts():
-    """Load trained ML artifacts created by run_all.py, if they exist."""
+    """Load available trained ML artifacts created by run_all.py/notebooks."""
     paths = {
         "score_model": ARTIFACTS_DIR / "best_score_model.pkl",
         "classification_model": ARTIFACTS_DIR / "best_classification_model.pkl",
         "classification_preprocess": ARTIFACTS_DIR / "preprocess_classification.pkl",
         "feature_columns": ARTIFACTS_DIR / "training_feature_columns.json",
     }
-    if not all(path.exists() for path in paths.values()):
-        return None
 
     import json
 
-    with paths["feature_columns"].open("r", encoding="utf-8") as handle:
-        feature_columns = json.load(handle)
+    feature_columns = {}
+    if paths["feature_columns"].exists():
+        with paths["feature_columns"].open("r", encoding="utf-8") as handle:
+            feature_columns = json.load(handle)
 
-    return {
-        "score_model": joblib.load(paths["score_model"]),
-        "classification_model": joblib.load(paths["classification_model"]),
-        "classification_preprocess": joblib.load(paths["classification_preprocess"]),
+    artifacts = {
+        "score_model": None,
+        "classification_model": None,
+        "classification_preprocess": None,
         "feature_columns": feature_columns,
     }
+
+    if paths["score_model"].exists():
+        artifacts["score_model"] = joblib.load(paths["score_model"])
+
+    if paths["classification_model"].exists() and paths["classification_preprocess"].exists():
+        artifacts["classification_model"] = joblib.load(paths["classification_model"])
+        artifacts["classification_preprocess"] = joblib.load(paths["classification_preprocess"])
+
+    return artifacts
 
 
 def predict_score(model, input_dict: dict) -> float:
@@ -86,6 +95,8 @@ def predict_score(model, input_dict: dict) -> float:
 
 def classify_score(model, preprocess, input_dict: dict) -> int:
     X = pd.DataFrame([input_dict])
+    if hasattr(model, "named_steps") and "preprocess" in model.named_steps:
+        return int(model.predict(X)[0])
     X_proc = preprocess.transform(X)
     return int(model.predict(X_proc)[0])
 
@@ -660,10 +671,13 @@ else:
     # ---- Prediction Tab -----------------------------------------------------------
     with user_tab5:
         st.subheader("🔮 Anime Score Prediction")
-        if ml_bundle is None:
+        if ml_bundle["score_model"] is None:
             st.info("Run `python run_all.py` to train and export the dashboard prediction artifacts.")
         else:
-            regression_features = ml_bundle["feature_columns"]["regression_features"]
+            regression_features = ml_bundle["feature_columns"].get("regression_features", [])
+            if not regression_features:
+                st.info("Missing regression feature metadata. Run `python run_all.py` to refresh dashboard artifacts.")
+                st.stop()
             prediction_source = filtered_df.dropna(subset=["title"]).copy()
             selected_title = st.selectbox(
                 "Base anime",
@@ -691,10 +705,13 @@ else:
 
     with user_tab6:
         st.subheader("High Score Classification")
-        if ml_bundle is None:
-            st.info("Run `python run_all.py` to train and export the dashboard classification artifacts.")
+        if ml_bundle["classification_model"] is None or ml_bundle["classification_preprocess"] is None:
+            st.info("Run `python run_all.py` or `notebooks/07_classification.ipynb` to train and export the dashboard classification artifacts.")
         else:
-            classification_features = ml_bundle["feature_columns"]["classification_features"]
+            classification_features = ml_bundle["feature_columns"].get("classification_features", [])
+            if not classification_features:
+                st.info("Missing classification feature metadata. Re-run `notebooks/07_classification.ipynb` or `python run_all.py`.")
+                st.stop()
             class_source = filtered_df.dropna(subset=["title"]).copy()
             selected_title = st.selectbox(
                 "Base anime",
@@ -703,6 +720,26 @@ else:
             )
             selected_row = class_source[class_source["title"] == selected_title].iloc[0]
             input_data = {feature: selected_row.get(feature, np.nan) for feature in classification_features}
+            if "anime_id" in classification_features and "mal_id" in selected_row:
+                input_data["anime_id"] = selected_row["mal_id"]
+            if "status" in classification_features:
+                input_data["status"] = st.selectbox(
+                    "Watch status",
+                    ["completed", "watching", "plan_to_watch", "on_hold", "dropped"],
+                    key="class_watch_status",
+                )
+            if "num_watched_episodes" in classification_features:
+                default_episodes = selected_row.get("episodes", 0)
+                default_episodes = 0 if pd.isna(default_episodes) else int(default_episodes)
+                input_data["num_watched_episodes"] = st.number_input(
+                    "Watched episodes",
+                    min_value=0,
+                    value=default_episodes,
+                    step=1,
+                    key="class_watched_episodes",
+                )
+            if "is_rewatching" in classification_features:
+                input_data["is_rewatching"] = float(st.checkbox("Rewatching", value=False, key="class_rewatching"))
 
             if st.button("Classify Score", key="classify_score_button"):
                 try:
