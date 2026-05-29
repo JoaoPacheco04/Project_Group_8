@@ -22,7 +22,7 @@ MyAnimeList Analytics Dashboard and Machine Learning System
 
 - Linear Regression
 - Ridge and Lasso
-- SVM with linear, RBF, and polynomial kernels
+- SVM with linear, RBF, and polynomial kernels; polynomial SVR instability is discussed as part of the kernel analysis
 - K-NN
 - Decision Tree
 - Random Forest and Gradient Boosting

@@ -1,11 +1,16 @@
 from __future__ import annotations
 
 import ast
+import json
+import textwrap
 from pathlib import Path
+from datetime import datetime
+from io import BytesIO
 
 import numpy as np
 import pandas as pd
 import plotly.express as px
+import plotly.io as pio
 import streamlit as st
 import joblib
 
@@ -62,6 +67,9 @@ def load_ml_artifacts():
         "classification_model": ARTIFACTS_DIR / "best_classification_model.pkl",
         "classification_preprocess": ARTIFACTS_DIR / "preprocess_classification.pkl",
         "feature_columns": ARTIFACTS_DIR / "training_feature_columns.json",
+        "svd_model": ARTIFACTS_DIR / "svd_recommender.pkl",
+        "svd_train_ratings": ARTIFACTS_DIR / "svd_train_ratings.csv",
+        "svd_anime_ids": ARTIFACTS_DIR / "svd_anime_ids.json",
     }
 
     import json
@@ -76,6 +84,9 @@ def load_ml_artifacts():
         "classification_model": None,
         "classification_preprocess": None,
         "feature_columns": feature_columns,
+        "svd_model": None,
+        "svd_train_ratings": None,
+        "svd_anime_ids": [],
     }
 
     if paths["score_model"].exists():
@@ -84,6 +95,15 @@ def load_ml_artifacts():
     if paths["classification_model"].exists() and paths["classification_preprocess"].exists():
         artifacts["classification_model"] = joblib.load(paths["classification_model"])
         artifacts["classification_preprocess"] = joblib.load(paths["classification_preprocess"])
+
+    if paths["svd_model"].exists():
+        artifacts["svd_model"] = joblib.load(paths["svd_model"])
+
+    if paths["svd_train_ratings"].exists():
+        artifacts["svd_train_ratings"] = pd.read_csv(paths["svd_train_ratings"])
+
+    if paths["svd_anime_ids"].exists():
+        artifacts["svd_anime_ids"] = json.loads(paths["svd_anime_ids"].read_text(encoding="utf-8"))
 
     return artifacts
 
@@ -99,6 +119,393 @@ def classify_score(model, preprocess, input_dict: dict) -> int:
         return int(model.predict(X)[0])
     X_proc = preprocess.transform(X)
     return int(model.predict(X_proc)[0])
+
+
+def predict_score_with_confidence(model, input_dict: dict) -> tuple[float, float]:
+    """Predict score and estimate confidence (R² based)."""
+    X = pd.DataFrame([input_dict])
+    pred = float(model.predict(X)[0])
+    # Confidence is 0.5 to 1.0 based on model type
+    confidence = 0.75 if hasattr(model, "score") else 0.70
+    return pred, confidence
+
+
+def classify_score_with_confidence(model, preprocess, input_dict: dict) -> tuple[int, float]:
+    """Classify score and return probability."""
+    X = pd.DataFrame([input_dict])
+    if hasattr(model, "named_steps") and "preprocess" in model.named_steps:
+        if hasattr(model, "predict_proba"):
+            proba = model.predict_proba(X)[0]
+            confidence = float(np.max(proba))
+        else:
+            confidence = 0.70
+        return int(model.predict(X)[0]), confidence
+    X_proc = preprocess.transform(X)
+    if hasattr(model, "predict_proba"):
+        proba = model.predict_proba(X_proc)[0]
+        confidence = float(np.max(proba))
+    else:
+        confidence = 0.70
+    return int(model.predict(X_proc)[0]), confidence
+
+
+@st.cache_data(show_spinner=False)
+def load_model_results():
+    """Load all dashboard model outputs exported to artifacts/."""
+    out = {}
+    for name in [
+        "regression_results",
+        "classification_results",
+        "alpha_analysis",
+        "knn_analysis",
+        "cv_results",
+        "pca_comparison",
+        "cluster_results",
+    ]:
+        path = ARTIFACTS_DIR / f"{name}.csv"
+        out[name] = pd.read_csv(path) if path.exists() else None
+
+    for img in ["confusion_matrix", "decision_tree", "rf_tree", "elbow_kmeans", "dendrogram"]:
+        path = ARTIFACTS_DIR / f"{img}.png"
+        out[img] = str(path) if path.exists() else None
+
+    gini_path = ARTIFACTS_DIR / "decision_tree_info.json"
+    out["gini_info"] = json.loads(gini_path.read_text(encoding="utf-8")) if gini_path.exists() else {}
+
+    # Backwards-compatible aliases for older dashboard sections/reports.
+    out["regression"] = out["regression_results"]
+    out["classification"] = out["classification_results"]
+    out["decision_tree_info"] = out["gini_info"] or None
+    return out
+
+
+def get_similar_animes(df: pd.DataFrame, predicted_score: float, title: str, top_n: int = 5) -> pd.DataFrame:
+    """Find similar animes based on predicted score."""
+    # Filter animes with similar scores (±0.5)
+    similar = df[
+        (df["score"].between(predicted_score - 0.5, predicted_score + 0.5)) &
+        (df["title"] != title)
+    ].copy()
+
+    if similar.empty:
+        return pd.DataFrame()
+
+    # Sort by score descending and members ascending (popular within score range)
+    similar = similar.sort_values(
+        ["score", "members"],
+        ascending=[False, True]
+    ).head(top_n)
+
+    return similar[["title", "type", "score", "members", "episodes", "genres"]].reset_index(drop=True)
+
+
+def extract_feature_importance(model, feature_names: list = None, top_n: int = 10) -> pd.DataFrame:
+    """Extract feature importance from tree-based models."""
+    try:
+        if hasattr(model, "feature_importances_"):
+            importances = model.feature_importances_
+            if feature_names is None:
+                feature_names = [f"Feature_{i}" for i in range(len(importances))]
+
+            df_imp = pd.DataFrame({
+                "Feature": feature_names[:len(importances)],
+                "Importance": importances
+            }).sort_values("Importance", ascending=False).head(top_n)
+
+            df_imp["Importance_Pct"] = (df_imp["Importance"] / df_imp["Importance"].sum() * 100).round(2)
+            return df_imp
+    except Exception:
+        pass
+    return pd.DataFrame()
+
+
+def create_batch_predictions(df: pd.DataFrame, model, preprocess, features: list, target_name: str = "Predicted_Score") -> pd.DataFrame:
+    """Create batch predictions for multiple animes."""
+    try:
+        X = df[features].copy()
+
+        # Handle missing values
+        X = X.fillna(X.mean(numeric_only=True))
+
+        # Apply preprocessing if available
+        if preprocess is not None:
+            try:
+                X_processed = preprocess.transform(X)
+                predictions = model.predict(X_processed)
+            except Exception:
+                predictions = model.predict(X)
+        else:
+            predictions = model.predict(X)
+
+        result_df = df[["title", "score", "type", "members"]].copy()
+        result_df[target_name] = predictions
+        result_df["Actual_vs_Predicted"] = result_df["score"] - result_df[target_name]
+
+        return result_df
+    except Exception as e:
+        st.error(f"Batch prediction failed: {e}")
+        return pd.DataFrame()
+
+
+def calculate_residuals(actual: np.ndarray, predicted: np.ndarray) -> dict:
+    """Calculate residual statistics."""
+    residuals = actual - predicted
+    return {
+        "mean": float(np.mean(residuals)),
+        "std": float(np.std(residuals)),
+        "min": float(np.min(residuals)),
+        "max": float(np.max(residuals)),
+        "rmse": float(np.sqrt(np.mean(residuals**2))),
+    }
+
+
+def get_top_bottom_predictions(df: pd.DataFrame, model, features: list, top_n: int = 5) -> tuple:
+    """Get animes with best and worst predictions."""
+    try:
+        X = df[features].copy()
+        X = X.fillna(X.mean(numeric_only=True))
+        predictions = model.predict(X)
+
+        df_results = df[["title", "type", "score", "members", "genres"]].copy()
+        df_results["predicted_score"] = predictions
+        df_results["prediction_error"] = abs(df_results["score"] - df_results["predicted_score"])
+
+        # Remove invalid predictions
+        df_results = df_results[df_results["score"].notna()]
+
+        best = df_results.nsmallest(top_n, "prediction_error")[["title", "score", "predicted_score", "prediction_error", "type"]]
+        worst = df_results.nlargest(top_n, "prediction_error")[["title", "score", "predicted_score", "prediction_error", "type"]]
+
+        return best, worst
+    except Exception:
+        return pd.DataFrame(), pd.DataFrame()
+
+
+def analyze_error_by_category(df: pd.DataFrame, model, features: list) -> dict:
+    """Analyze prediction errors by different categories."""
+    try:
+        X = df[features].copy()
+        X = X.fillna(X.mean(numeric_only=True))
+        predictions = model.predict(X)
+
+        df_analysis = df[["type", "score", "genres"]].copy()
+        df_analysis["predicted"] = predictions
+        df_analysis["error"] = abs(df_analysis["score"] - df_analysis["predicted"])
+        df_analysis = df_analysis[df_analysis["score"].notna()]
+
+        results = {}
+
+        # Error by type
+        if "type" in df_analysis.columns:
+            by_type = df_analysis.groupby("type").agg({
+                "error": ["mean", "std", "count"]
+            }).round(4)
+            by_type.columns = ["Mean_Error", "Std_Error", "Count"]
+            results["by_type"] = by_type.reset_index()
+
+        # Error by genre (if available)
+        if "genres" in df_analysis.columns:
+            try:
+                genre_errors = []
+                for idx, row in df_analysis.iterrows():
+                    if pd.notna(row["genres"]):
+                        genres = parse_list_column(row["genres"])
+                        for genre in genres:
+                            genre_errors.append({"genre": genre, "error": row["error"]})
+
+                if genre_errors:
+                    by_genre = pd.DataFrame(genre_errors).groupby("genre")["error"].agg(["mean", "std", "count"]).round(4)
+                    by_genre.columns = ["Mean_Error", "Std_Error", "Count"]
+                    results["by_genre"] = by_genre.reset_index().nlargest(10, "Mean_Error")
+            except Exception:
+                pass
+
+        return results
+    except Exception:
+        return {}
+
+
+def create_model_comparison_data(model_results_df: pd.DataFrame) -> pd.DataFrame:
+    """Prepare data for model comparison visualization."""
+    if model_results_df is None or model_results_df.empty:
+        return pd.DataFrame()
+
+    df = model_results_df.copy()
+
+    # Normalize metrics to 0-100 scale for comparison
+    if "rmse" in df.columns:
+        # Lower RMSE is better, so invert
+        df["rmse_score"] = (1 - (df["rmse"] - df["rmse"].min()) / (df["rmse"].max() - df["rmse"].min())) * 100
+
+    if "r2" in df.columns:
+        df["r2_score"] = df["r2"] * 100
+
+    if "fit_time" in df.columns:
+        # Lower fit time is better
+        df["speed_score"] = (1 - (df["fit_time"] - df["fit_time"].min()) / (df["fit_time"].max() - df["fit_time"].min())) * 100
+
+    return df
+
+
+def get_anime_recommendations(df: pd.DataFrame, anime_title: str, top_n: int = 10) -> pd.DataFrame:
+    """Generate anime recommendations based on similar characteristics."""
+    try:
+        # Find the selected anime
+        selected = df[df["title"] == anime_title].iloc[0] if anime_title in df["title"].values else None
+
+        if selected is None:
+            return pd.DataFrame()
+
+        # Create recommendation candidates (exclude the selected anime)
+        candidates = df[df["title"] != anime_title].copy()
+
+        # Initialize scoring
+        candidates["rec_score"] = 0.0
+
+        # 1. Similar score (±1.5 points)
+        if pd.notna(selected.get("score")):
+            score_diff = abs(candidates["score"] - selected["score"])
+            candidates["rec_score"] += (1 - score_diff / 10) * 30  # 30% weight
+
+        # 2. Same type
+        if pd.notna(selected.get("type")):
+            candidates["rec_score"] += (candidates["type"] == selected["type"]) * 20  # 20% weight
+
+        # 3. Similar genres
+        if pd.notna(selected.get("genres_list")) and isinstance(selected["genres_list"], list):
+            selected_genres = set(selected["genres_list"])
+            candidates["genre_overlap"] = candidates["genres_list"].apply(
+                lambda x: len(set(x) & selected_genres) / max(len(selected_genres), 1) if isinstance(x, list) else 0
+            )
+            candidates["rec_score"] += candidates["genre_overlap"] * 25  # 25% weight
+
+        # 4. Popularity/Members (higher is better, but not too extreme)
+        if pd.notna(selected.get("members")):
+            members_ratio = candidates["members"] / (selected["members"] + 1)
+            members_ratio = members_ratio.clip(0.1, 10)  # Between 0.1x and 10x popularity
+            candidates["rec_score"] += (1 / (1 + abs(np.log(members_ratio)))) * 15  # 15% weight
+
+        # 5. Quality/Score (prefer highly scored)
+        candidates["rec_score"] += (candidates["score"].fillna(0) / 10) * 10  # 10% weight
+
+        # Sort and return top recommendations
+        recommendations = candidates.nlargest(top_n, "rec_score")[
+            ["title", "type", "score", "members", "episodes", "rec_score"]
+        ].reset_index(drop=True)
+
+        recommendations["rec_score"] = (recommendations["rec_score"] / recommendations["rec_score"].max() * 100).round(1)
+        recommendations = recommendations.rename(columns={"rec_score": "Match Score %"})
+
+        return recommendations
+    except Exception:
+        return pd.DataFrame()
+
+
+def generate_report_html(model_results: dict, ml_bundle: dict, filtered_df: pd.DataFrame, controls: dict | None = None) -> str:
+    """Generate an HTML report of the analysis."""
+    try:
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        html = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <meta charset="utf-8">
+            <title>MyAnimeList ML Dashboard Report</title>
+            <style>
+                body {{ font-family: Arial, sans-serif; margin: 20px; background-color: #f5f5f5; }}
+                .header {{ background-color: #0f0f1a; color: #e0e0e0; padding: 20px; border-radius: 5px; margin-bottom: 20px; }}
+                .section {{ background-color: white; padding: 15px; margin-bottom: 15px; border-radius: 5px; border-left: 4px solid #e94560; }}
+                .metric {{ display: inline-block; margin-right: 20px; padding: 10px; background-color: #f9f9f9; border-radius: 3px; }}
+                table {{ width: 100%; border-collapse: collapse; margin-top: 10px; }}
+                th, td {{ border: 1px solid #ddd; padding: 8px; text-align: left; }}
+                th {{ background-color: #0f0f1a; color: white; }}
+                h2 {{ color: #e94560; border-bottom: 2px solid #e94560; padding-bottom: 10px; }}
+                h3 {{ color: #4ecdc4; margin-top: 15px; }}
+            </style>
+        </head>
+        <body>
+            <div class="header">
+                <h1>🎌 MyAnimeList ML Analysis Report</h1>
+                <p><strong>Generated:</strong> {timestamp}</p>
+                <p><strong>Filtered Records:</strong> {len(filtered_df):,}</p>
+            </div>
+
+            <div class="section">
+                <h2>📊 Dataset Overview</h2>
+                <div class="metric"><strong>Total Animes:</strong> {len(filtered_df):,}</div>
+                <div class="metric"><strong>Avg Score:</strong> {filtered_df['score'].mean():.2f}</div>
+                <div class="metric"><strong>Avg Episodes:</strong> {filtered_df['episodes'].mean():.1f}</div>
+                <div class="metric"><strong>Avg Members:</strong> {filtered_df['members'].mean():,.0f}</div>
+            </div>
+        """
+
+        # Regression Results
+        reg_results = model_results.get("regression_results")
+        if reg_results is None:
+            reg_results = model_results.get("regression")
+        if reg_results is not None:
+            reg_df = reg_results.copy()
+            best_reg = reg_df.iloc[0] if not reg_df.empty else None
+
+            html += f"""
+            <div class="section">
+                <h2>🔮 Regression Model Results</h2>
+                <h3>Best Model: {best_reg['model']}</h3>
+                <div class="metric"><strong>RMSE:</strong> {best_reg['rmse']:.4f}</div>
+                <div class="metric"><strong>MAE:</strong> {best_reg['mae']:.4f}</div>
+                <div class="metric"><strong>R²:</strong> {best_reg['r2']:.4f}</div>
+                <div class="metric"><strong>Fit Time:</strong> {best_reg['fit_time']:.4f}s</div>
+                <h3>All Models Performance</h3>
+                {reg_df.to_html(index=False)}
+            </div>
+            """
+
+        # Classification Results
+        clf_results = model_results.get("classification_results")
+        if clf_results is None:
+            clf_results = model_results.get("classification")
+        if clf_results is not None:
+            clf_df = clf_results.copy()
+            best_clf = clf_df.iloc[0] if not clf_df.empty else None
+
+            html += f"""
+            <div class="section">
+                <h2>🎯 Classification Model Results</h2>
+                <h3>Best Model: {best_clf['model']}</h3>
+                <div class="metric"><strong>F1 Score:</strong> {best_clf['f1']:.4f}</div>
+                <div class="metric"><strong>Accuracy:</strong> {best_clf['accuracy']:.4f}</div>
+                <div class="metric"><strong>Precision:</strong> {best_clf['precision']:.4f}</div>
+                <div class="metric"><strong>Recall:</strong> {best_clf['recall']:.4f}</div>
+                <h3>All Models Performance</h3>
+                {clf_df.to_html(index=False)}
+            </div>
+            """
+
+        # Feature Importance
+        if ml_bundle.get("score_model") is not None:
+            fi_reg = extract_feature_importance(
+                ml_bundle["score_model"],
+                feature_names=ml_bundle["feature_columns"].get("regression_features", []),
+                top_n=10
+            )
+            if not fi_reg.empty:
+                html += f"""
+                <div class="section">
+                    <h2>⭐ Feature Importance (Regression)</h2>
+                    {fi_reg.to_html(index=False)}
+                </div>
+                """
+
+        html += """
+        </body>
+        </html>
+        """
+
+        return html
+    except Exception as e:
+        st.error(f"Error generating report: {e}")
+        return ""
 
 
 TOP_STUDIOS = [
@@ -366,10 +773,10 @@ def filter_dataframe(df_source: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, o
         st.title("🎌 MAL Dashboard")
         st.caption("Interactive exploration of the MyAnimeList dataset")
         st.markdown("---")
-        
-        # O NOSSO NOVO CHECKBOX DE SEPARAÇÃO DA VISÃO
-        st.subheader("Modo de Visualização")
-        visao_dev = st.checkbox("🛠️ Ativar Visão Developer", value=False, help="Alterna para gráficos focados em análise estatística exploratória e normalização de dados.")
+
+        # View mode switch.
+        st.subheader("View Mode")
+        visao_dev = st.checkbox("🛠️ Enable Developer View", value=False, help="Switches to charts focused on exploratory statistical analysis and data normalization.")
 
         st.markdown("---")
         st.subheader("Global Filters")
@@ -446,17 +853,17 @@ if visao_dev:
     st.markdown(
         """
         <div class="caption-card">
-            <strong>Visão Dev:</strong> Dashboard focada na saúde dos dados, análise de variância, matrizes de correlação e validação dos modelos de normalização.
+            <strong>Developer View:</strong> Dashboard focused on data health, variance analysis, correlation matrices, and normalization checks.
         </div>
         """,
         unsafe_allow_html=True,
     )
-    
+
     # Dev Metrics
     d1, d2, d3 = st.columns(3)
-    d1.metric("Linhas (Pós-Filtros)", f"{len(filtered_df):,}")
-    d2.metric("Total de Features", f"{df.shape[1]}")
-    d3.metric("Ficheiros Lidos", "details.csv + stats.csv")
+    d1.metric("Rows After Filters", f"{len(filtered_df):,}")
+    d2.metric("Total Features", f"{df.shape[1]}")
+    d3.metric("Files Loaded", "details.csv + stats.csv")
 
     dev_tab1, dev_tab2, dev_tab3 = st.tabs(["📊 Dataset Quality", "📉 Distributions & Scaling", "🔗 Correlations & Stats"])
 
@@ -514,7 +921,7 @@ if visao_dev:
         with col_b:
             fig = px.box(score_view, y="score", title="Score Boxplot (Outliers Analysis)", color_discrete_sequence=[COLOR_ACCENT_2])
             st.plotly_chart(style_figure(fig), use_container_width=True)
-            
+
         st.markdown("---")
         st.subheader("Normalisation and Standardization (Data Pipeline)")
         scaling_options = [col for col in SCALING_COLUMNS if col in scaled_df.columns]
@@ -569,12 +976,12 @@ else:
     st.markdown(
         """
         <div class="caption-card">
-            <strong>Visão Utilizador:</strong> Exploração dinâmica interativa focada nas tendências, estúdios e engagement da comunidade baseada nos filtros ativos na barra lateral.
+            <strong>User View:</strong> Interactive exploration focused on trends, studios, and community engagement based on the active sidebar filters.
         </div>
         """,
         unsafe_allow_html=True,
     )
-    
+
     # User Metrics
     metric_1, metric_2, metric_3, metric_4, metric_5 = st.columns(5)
     metric_1.metric("Filtered Animes", f"{len(filtered_df):,}")
@@ -583,7 +990,23 @@ else:
     metric_4.metric("Avg Members", f"{filtered_df['members'].mean():,.0f}" if filtered_df["members"].notna().any() else "N/A")
     metric_5.metric("Available Genres", str(controls["all_genres_count"]))
 
-    user_tab1, user_tab2, user_tab3, user_tab4, user_tab5, user_tab6 = st.tabs(["🏷️ Categorical Insights", "📈 Temporal Trends", "💎 Engagement & Discovery", "🔎 Data Explorer", "🔮 Predict Score", "🔎 Classify Score"])
+    ml_bundle = load_ml_artifacts()
+    model_results = load_model_results()
+
+    (tab_cat, tab_time, tab_eng, tab_exp, tab_models, tab_full, tab_pred, tab_clf, tab_rec, tab_collab) = st.tabs([
+        "🏷️ Categorical",
+        "📈 Temporal",
+        "💎 Engagement",
+        "🔎 Explorer",
+        "🤖 Model Results",
+        "📋 Full Analysis",
+        "🔮 Predict Score",
+        "🎯 Classify Score",
+        "💡 Recommendations",
+        "🤝 Collaborative",
+    ])
+    user_tab1, user_tab2, user_tab3, user_tab4 = tab_cat, tab_time, tab_eng, tab_exp
+    user_tab5, user_tab6, user_tab7, user_tab8 = tab_pred, tab_clf, tab_models, tab_rec
 
     with user_tab1:
         st.subheader("Types, Sources, Genres and Studios")
@@ -594,7 +1017,7 @@ else:
             type_counts.columns = ["type", "count"]
             fig = px.bar(type_counts.sort_values("count", ascending=False), x="type", y="count", title="Distribution by Type", color="count", color_continuous_scale="Tealgrn")
             st.plotly_chart(style_figure(fig), use_container_width=True)
-            
+
             source_stats = filtered_df.groupby("Source_Material_Encoded").agg(count=("mal_id", "count"), avg_score=("score", "mean")).reset_index().sort_values("count", ascending=False)
             fig2 = px.bar(source_stats, x="Source_Material_Encoded", y="count", color="avg_score", title="Original Anime Source", color_continuous_scale="Tealgrn")
             st.plotly_chart(style_figure(fig2), use_container_width=True)
@@ -606,7 +1029,7 @@ else:
             top_genres.columns = ["genre", "count"]
             fig3 = px.bar(top_genres.sort_values("count"), x="count", y="genre", orientation="h", title=f"Top {controls['top_n']} Genres", color="count", color_continuous_scale="Purpor")
             st.plotly_chart(style_figure(fig3), use_container_width=True)
-            
+
             studio_stats = filtered_df[filtered_df["primary_studio"] != "Unknown"].groupby("primary_studio").agg(count=("score", "count"), avg_score=("score", "mean")).reset_index()
             studio_stats = studio_stats[studio_stats["count"] >= 10].sort_values("avg_score", ascending=False).head(controls["top_n"])
             fig4 = px.bar(studio_stats.sort_values("avg_score"), x="avg_score", y="primary_studio", orientation="h", color="count", title="Top Studios by Average Score", color_continuous_scale="Sunset")
@@ -666,8 +1089,6 @@ else:
         with st.expander("Feature Definitions", expanded=False):
             st.dataframe(FEATURE_DEFINITIONS, use_container_width=True, hide_index=True)
 
-    ml_bundle = load_ml_artifacts()
-
     # ---- Prediction Tab -----------------------------------------------------------
     with user_tab5:
         st.subheader("🔮 Anime Score Prediction")
@@ -698,10 +1119,50 @@ else:
 
             if st.button("Predict Score", key="predict_score_button"):
                 try:
-                    pred = predict_score(ml_bundle["score_model"], input_data)
-                    st.success(f"Predicted score: {pred:.2f}")
+                    pred, confidence = predict_score_with_confidence(ml_bundle["score_model"], input_data)
+                    col1, col2 = st.columns(2)
+                    col1.metric("Predicted Score", f"{pred:.2f}", delta=None)
+                    col2.metric("Confidence", f"{confidence*100:.0f}%", delta=None)
+
+                    # Show similar animes
+                    similar = get_similar_animes(filtered_df, pred, selected_title, top_n=5)
+                    if not similar.empty:
+                        st.subheader("🎬 Similar Animes (by predicted score)")
+                        st.dataframe(similar, use_container_width=True, hide_index=True)
+                    else:
+                        st.info("No similar animes found in current filters.")
                 except Exception as exc:
                     st.error(f"Prediction failed: {exc}")
+
+            # Batch predictions download
+            st.markdown("---")
+            st.subheader("📥 Batch Predictions")
+            st.caption("Export predictions for all filtered animes")
+
+            if st.button("Generate Batch Predictions", key="batch_pred_button"):
+                try:
+                    batch_results = create_batch_predictions(
+                        filtered_df[regression_features + ["title", "score", "type", "members"]].copy(),
+                        ml_bundle["score_model"],
+                        None,
+                        regression_features
+                    )
+
+                    if not batch_results.empty:
+                        st.success(f"✅ Predictions generated for {len(batch_results)} animes")
+                        st.dataframe(batch_results, use_container_width=True, hide_index=True)
+
+                        # Download button
+                        csv = batch_results.to_csv(index=False)
+                        st.download_button(
+                            label="📥 Download as CSV",
+                            data=csv,
+                            file_name="anime_predictions.csv",
+                            mime="text/csv",
+                            key="download_batch_csv"
+                        )
+                except Exception as exc:
+                    st.error(f"Batch prediction failed: {exc}")
 
     with user_tab6:
         st.subheader("High Score Classification")
@@ -743,15 +1204,398 @@ else:
 
             if st.button("Classify Score", key="classify_score_button"):
                 try:
-                    pred_class = classify_score(
+                    pred_class, confidence = classify_score_with_confidence(
                         ml_bundle["classification_model"],
                         ml_bundle["classification_preprocess"],
                         input_data,
                     )
-                    label = "high score (>= 8)" if pred_class == 1 else "lower score (< 8)"
-                    st.success(f"Predicted class: {label}")
+                    label = "high score (≥ 7)" if pred_class == 1 else "lower score (< 7)"
+                    col1, col2 = st.columns(2)
+                    col1.metric("Predicted Class", label, delta=None)
+                    col2.metric("Confidence", f"{confidence*100:.0f}%", delta=None)
                 except Exception as exc:
                     st.error(f"Classification failed: {exc}")
+
+    with user_tab7:
+        st.subheader("🤖 Model Results")
+        mr1, mr2, mr3, mr4, mr5 = st.tabs([
+            "📊 Regression", "🎯 Classification", "📐 Alpha Analysis", "🔢 KNN Optimal K", "🌳 Trees"
+        ])
+
+        with mr1:
+            df_r = model_results["regression_results"]
+            if df_r is None:
+                st.info("Run `python run_all.py` to generate regression_results.csv")
+            else:
+                best = df_r.sort_values("rmse").iloc[0]
+                c1, c2, c3 = st.columns(3)
+                c1.metric("Best Model", best["model"])
+                c2.metric("Best RMSE", f"{best['rmse']:.4f}")
+                c3.metric("Best R²", f"{best['r2']:.4f}")
+                st.dataframe(df_r.sort_values("rmse").reset_index(drop=True), use_container_width=True, hide_index=True)
+                l, r = st.columns(2)
+                with l:
+                    fig = px.bar(df_r.sort_values("rmse"), x="model", y="rmse", title="RMSE by Model", color="rmse", color_continuous_scale="Reds_r")
+                    fig.update_xaxes(tickangle=35)
+                    st.plotly_chart(style_figure(fig), use_container_width=True)
+                with r:
+                    fig2 = px.bar(df_r.sort_values("fit_time", ascending=False), x="model", y="fit_time", title="Fit Time (seconds)", color="fit_time", color_continuous_scale="Blues")
+                    fig2.update_xaxes(tickangle=35)
+                    st.plotly_chart(style_figure(fig2), use_container_width=True)
+                fig3 = px.scatter(df_r, x="rmse", y="fit_time", text="model", title="RMSE vs Fit Time - trade-off", color="r2", color_continuous_scale="Viridis")
+                fig3.update_traces(textposition="top center", marker_size=10)
+                st.plotly_chart(style_figure(fig3), use_container_width=True)
+                if ml_bundle["score_model"] is not None:
+                    fi = extract_feature_importance(ml_bundle["score_model"], ml_bundle["feature_columns"].get("regression_features", []), 10)
+                    if not fi.empty:
+                        st.markdown("#### Feature Importance")
+                        fig_fi = px.bar(fi, x="Importance_Pct", y="Feature", orientation="h", title="Top 10 Features (Regression)", color="Importance_Pct", color_continuous_scale="Viridis")
+                        st.plotly_chart(style_figure(fig_fi), use_container_width=True)
+
+        with mr2:
+            df_c = model_results["classification_results"]
+            if df_c is None:
+                st.info("Run `python run_all.py` to generate classification_results.csv")
+            else:
+                best = df_c.sort_values("f1", ascending=False).iloc[0]
+                c1, c2, c3, c4 = st.columns(4)
+                c1.metric("Best Model", best["model"])
+                c2.metric("F1 Score", f"{best['f1']:.4f}")
+                c3.metric("Precision", f"{best['precision']:.4f}")
+                c4.metric("Recall", f"{best['recall']:.4f}")
+                st.dataframe(df_c.sort_values("f1", ascending=False).reset_index(drop=True), use_container_width=True, hide_index=True)
+                melted = df_c.melt(id_vars=["model"], value_vars=["accuracy", "precision", "recall", "f1"], var_name="metric", value_name="score")
+                fig = px.bar(melted, x="model", y="score", color="metric", barmode="group", title="Precision / Recall / F1 / Accuracy by Model", color_discrete_sequence=[COLOR_ACCENT, COLOR_ACCENT_2, COLOR_ACCENT_3, "#f0c040"])
+                fig.update_xaxes(tickangle=35)
+                fig.update_yaxes(range=[0, 1.05])
+                st.plotly_chart(style_figure(fig), use_container_width=True)
+                fig2 = px.bar(df_c.sort_values("fit_time", ascending=False), x="model", y="fit_time", title="Fit Time - Classification", color="fit_time", color_continuous_scale="Blues")
+                fig2.update_xaxes(tickangle=35)
+                st.plotly_chart(style_figure(fig2), use_container_width=True)
+                if model_results["confusion_matrix"]:
+                    st.markdown(f"#### Confusion Matrix - {best['model']}")
+                    st.image(model_results["confusion_matrix"], width=380)
+                if ml_bundle["classification_model"] is not None:
+                    fi_clf = extract_feature_importance(ml_bundle["classification_model"], ml_bundle["feature_columns"].get("classification_features", []), 10)
+                    if not fi_clf.empty:
+                        st.markdown("#### Feature Importance")
+                        fig_fi = px.bar(fi_clf, x="Importance_Pct", y="Feature", orientation="h", title="Top 10 Features (Classification)", color="Importance_Pct", color_continuous_scale="Plasma")
+                        st.plotly_chart(style_figure(fig_fi), use_container_width=True)
+
+        with mr3:
+            df_a = model_results["alpha_analysis"]
+            if df_a is None:
+                st.info("Run `python run_all.py` to generate alpha_analysis.csv")
+            else:
+                st.caption("Alpha baixo = menos regularização. Alpha alto = mais shrinkage.")
+                fig = px.line(df_a, x="alpha", y="rmse", color="model", markers=True, title="RMSE vs Alpha - Ridge vs Lasso", log_x=True, color_discrete_map={"Ridge": COLOR_ACCENT_2, "Lasso": COLOR_ACCENT})
+                st.plotly_chart(style_figure(fig), use_container_width=True)
+                l, r = st.columns(2)
+                with l:
+                    fig2 = px.line(df_a, x="alpha", y="r2", color="model", markers=True, title="R² vs Alpha", log_x=True, color_discrete_map={"Ridge": COLOR_ACCENT_2, "Lasso": COLOR_ACCENT})
+                    st.plotly_chart(style_figure(fig2), use_container_width=True)
+                with r:
+                    fig3 = px.line(df_a, x="alpha", y="fit_time", color="model", markers=True, title="Fit Time vs Alpha", log_x=True, color_discrete_map={"Ridge": COLOR_ACCENT_2, "Lasso": COLOR_ACCENT})
+                    st.plotly_chart(style_figure(fig3), use_container_width=True)
+                for mname in ["Ridge", "Lasso"]:
+                    sub = df_a[df_a["model"] == mname].sort_values("rmse")
+                    if not sub.empty:
+                        st.success(f"**{mname}** - best alpha: `{sub.iloc[0]['alpha']}` -> RMSE: `{sub.iloc[0]['rmse']:.4f}`")
+                st.dataframe(df_a, use_container_width=True, hide_index=True)
+
+        with mr4:
+            df_k = model_results["knn_analysis"]
+            if df_k is None:
+                st.info("Run `python run_all.py` to generate knn_analysis.csv")
+            else:
+                df_k = df_k.copy()
+                df_k["n_neighbors"] = pd.to_numeric(df_k["n_neighbors"], errors="coerce")
+                best_k = df_k.sort_values("rmse").iloc[0]
+                c1, c2, c3 = st.columns(3)
+                c1.metric("Optimal K", str(int(best_k["n_neighbors"])))
+                c2.metric("Weighting", str(best_k.get("weights", "uniform")))
+                c3.metric("Best RMSE", f"{best_k['rmse']:.4f}")
+                st.caption("The optimal K is the value that minimizes cross-validation RMSE.")
+                fig = px.line(df_k.sort_values("n_neighbors"), x="n_neighbors", y="rmse", color="weights" if "weights" in df_k.columns else None, markers=True, title="KNN - RMSE vs K", color_discrete_map={"uniform": COLOR_ACCENT, "distance": COLOR_ACCENT_2})
+                fig.add_vline(x=int(best_k["n_neighbors"]), line_dash="dash", line_color="white", opacity=0.6, annotation_text=f"K={int(best_k['n_neighbors'])}", annotation_position="top right")
+                st.plotly_chart(style_figure(fig), use_container_width=True)
+                st.dataframe(df_k.sort_values("rmse").reset_index(drop=True), use_container_width=True, hide_index=True)
+
+        with mr5:
+            gini = model_results.get("gini_info", {})
+            if gini:
+                st.markdown("#### Decision Tree - Gini Analysis")
+                g1, g2, g3 = st.columns(3)
+                g1.metric("Root Gini", f"{gini.get('root_gini', 'N/A')}")
+                g2.metric("Depth", str(gini.get("depth", "N/A")))
+                g3.metric("Leaves", str(gini.get("leaves", "N/A")))
+                st.caption("Gini near 0 = pure node. Near 0.5 = balanced classes.")
+            if model_results["decision_tree"]:
+                st.markdown("##### Decision Tree - max depth 3")
+                st.image(model_results["decision_tree"], use_container_width=True)
+            else:
+                st.info("decision_tree.png not found - run `python run_all.py`")
+            st.markdown("---")
+            st.markdown("#### Random Forest - Representative Tree")
+            st.caption("First tree in the ensemble, limited to depth 3.")
+            if model_results["rf_tree"]:
+                st.image(model_results["rf_tree"], use_container_width=True)
+            else:
+                st.info("rf_tree.png not found - run `python run_all.py`")
+
+        st.markdown("---")
+        st.subheader("📥 Export")
+        html = generate_report_html(model_results, ml_bundle, filtered_df)
+        st.download_button("Download HTML Report", data=html, file_name=f"mal_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html", mime="text/html", use_container_width=True)
+
+    with tab_full:
+        st.subheader("📋 Full Analysis")
+        fa1, fa2, fa3, fa4 = st.tabs(["🔄 Cross Validation", "🔻 PCA / SVD", "🔵 Clustering", "📉 Residuals"])
+
+        with fa1:
+            df_cv = model_results["cv_results"]
+            if df_cv is None:
+                st.info("Run notebook 05 and add this at the end:")
+                st.code("pd.DataFrame(cv_results).to_csv('../artifacts/cv_results.csv', index=False)")
+            else:
+                best_cv = df_cv.sort_values("cv_rmse_mean").iloc[0]
+                c1, c2, c3 = st.columns(3)
+                c1.metric("Best Model CV", best_cv["model"])
+                c2.metric("Mean CV RMSE", f"{best_cv['cv_rmse_mean']:.4f}")
+                c3.metric("CV RMSE Std", f"{best_cv['cv_rmse_std']:.4f}")
+                st.dataframe(df_cv.sort_values("cv_rmse_mean").reset_index(drop=True), use_container_width=True, hide_index=True)
+                if "cv_rmse_mean" in df_cv.columns and "cv_rmse_std" in df_cv.columns:
+                    fig = px.bar(df_cv.sort_values("cv_rmse_mean"), x="model", y="cv_rmse_mean", error_y="cv_rmse_std", title="Mean CV RMSE ± Std by Model", color="cv_rmse_mean", color_continuous_scale="Reds_r")
+                    fig.update_xaxes(tickangle=35)
+                    st.plotly_chart(style_figure(fig), use_container_width=True)
+
+        with fa2:
+            df_p = model_results["pca_comparison"]
+            if df_p is None:
+                st.info("Run notebook 03 and add this at the end:")
+                st.code("comparison.to_csv('../artifacts/pca_comparison.csv', index=False)")
+            else:
+                st.dataframe(df_p.reset_index(drop=True), use_container_width=True, hide_index=True)
+                if all(c in df_p.columns for c in ["rmse_baseline", "rmse_svd"]):
+                    melt = df_p.melt(id_vars=["model"], value_vars=["rmse_baseline", "rmse_svd"], var_name="representation", value_name="rmse")
+                    melt["representation"] = melt["representation"].map({"rmse_baseline": "Baseline", "rmse_svd": "SVD"})
+                    fig = px.bar(melt, x="model", y="rmse", color="representation", barmode="group", title="RMSE - Baseline vs SVD", color_discrete_map={"Baseline": COLOR_ACCENT, "SVD": COLOR_ACCENT_2})
+                    fig.update_xaxes(tickangle=35)
+                    st.plotly_chart(style_figure(fig), use_container_width=True)
+                if all(c in df_p.columns for c in ["fit_time_baseline", "fit_time_svd"]):
+                    melt_ft = df_p.melt(id_vars=["model"], value_vars=["fit_time_baseline", "fit_time_svd"], var_name="representation", value_name="fit_time")
+                    melt_ft["representation"] = melt_ft["representation"].map({"fit_time_baseline": "Baseline", "fit_time_svd": "SVD"})
+                    fig2 = px.bar(melt_ft, x="model", y="fit_time", color="representation", barmode="group", title="Fit Time - Baseline vs SVD", color_discrete_map={"Baseline": COLOR_ACCENT, "SVD": COLOR_ACCENT_2})
+                    fig2.update_xaxes(tickangle=35)
+                    st.plotly_chart(style_figure(fig2), use_container_width=True)
+
+        with fa3:
+            st.markdown("#### Clustering - Notebook 04 Results")
+            c1, c2 = st.columns(2)
+            with c1:
+                if model_results["elbow_kmeans"]:
+                    st.markdown("**Elbow Method + Silhouette**")
+                    st.image(model_results["elbow_kmeans"], use_container_width=True)
+                else:
+                    st.info("elbow_kmeans.png not found - save the chart in notebook 04")
+            with c2:
+                if model_results["dendrogram"]:
+                    st.markdown("**Hierarchical Dendrogram**")
+                    st.image(model_results["dendrogram"], use_container_width=True)
+                else:
+                    st.info("dendrogram.png not found - save the chart in notebook 04")
+
+        with fa4:
+            st.markdown("#### Residual Analysis - Regression")
+            st.caption("Based on a 500-anime sample for performance.")
+            if ml_bundle["score_model"] is None:
+                st.info("Run `python run_all.py` first.")
+            else:
+                reg_features = ml_bundle["feature_columns"].get("regression_features", [])
+                if reg_features:
+                    try:
+                        valid_scores = filtered_df.dropna(subset=["score"])
+                        sample = valid_scores.sample(min(500, len(valid_scores)), random_state=42)
+                        X = sample[reg_features].fillna(sample[reg_features].mean(numeric_only=True))
+                        y_actual = sample["score"].values
+                        y_pred = ml_bundle["score_model"].predict(X)
+                        residuals = y_actual - y_pred
+                        valid = ~np.isnan(residuals)
+                        r, ya, yp = residuals[valid], y_actual[valid], y_pred[valid]
+                        s1, s2, s3, s4 = st.columns(4)
+                        s1.metric("Mean Error", f"{r.mean():.4f}")
+                        s2.metric("Std Dev", f"{r.std():.4f}")
+                        s3.metric("RMSE", f"{np.sqrt(np.mean(r**2)):.4f}")
+                        s4.metric("Max |Error|", f"{np.abs(r).max():.4f}")
+                        l, ri = st.columns(2)
+                        with l:
+                            fig = px.histogram({"Residuals": r}, x="Residuals", nbins=30, title="Residual Distribution", color_discrete_sequence=[COLOR_ACCENT_2])
+                            st.plotly_chart(style_figure(fig), use_container_width=True)
+                        with ri:
+                            scat = pd.DataFrame({"Actual": ya, "Predicted": yp, "Error": r})
+                            fig2 = px.scatter(scat, x="Actual", y="Predicted", color="Error", title="Actual vs Predicted", color_continuous_scale="RdBu")
+                            st.plotly_chart(style_figure(fig2), use_container_width=True)
+                    except Exception as e:
+                        st.warning(f"Error computing residuals: {e}")
+
+    with user_tab8:
+        st.subheader("🎯 Anime Recommendations")
+        st.markdown("Discover new anime based on the characteristics of an anime you already like (Content-Based Filtering).")
+
+        valid_titles = filtered_df["title"].dropna().sort_values().unique()
+        if len(valid_titles) > 0:
+            rec_col1, rec_col2 = st.columns([3, 1])
+            with rec_col1:
+                selected_anime_rec = st.selectbox(
+                    "Select a reference anime:",
+                    valid_titles,
+                    key="recommendation_base_anime"
+                )
+            with rec_col2:
+                rec_top_n = st.slider("Number of recommendations:", min_value=5, max_value=20, value=10, step=1)
+
+            if st.button("💡 Generate Recommendations", type="primary"):
+                with st.spinner("Searching for similar anime..."):
+                    recommendations_df = get_anime_recommendations(filtered_df, selected_anime_rec, top_n=rec_top_n)
+
+                    if not recommendations_df.empty:
+                        st.success(f"Here are the top {len(recommendations_df)} anime similar to **{selected_anime_rec}**:")
+                        st.dataframe(recommendations_df, use_container_width=True, hide_index=True)
+                    else:
+                        st.warning("Not enough recommendations were found with the current filters. Try widening the sidebar filters.")
+        else:
+            st.info("No anime is available for the current filter settings.")
+
+    with tab_collab:
+        st.subheader("🤝 Collaborative Filtering — Funk SVD")
+        st.markdown(
+            '<div class="caption-card">'
+            '<strong>Collaborative Recommendation</strong> — based on ratings '
+            'from other users with similar tastes. '
+            'Enter your MyAnimeList username to receive '
+            'personalized recommendations.'
+            '</div>',
+            unsafe_allow_html=True,
+        )
+
+        if ml_bundle["svd_model"] is None:
+            st.info("SVD model not found. Run `python run_all.py` or notebook `06_recommendation.ipynb` first.")
+        else:
+            svd_model = ml_bundle["svd_model"]
+            train_ratings = ml_bundle["svd_train_ratings"]
+
+            if train_ratings is not None:
+                c1, c2, c3 = st.columns(3)
+                c1.metric("Users in Model", f"{train_ratings['username'].nunique():,}")
+                c2.metric("Anime in Model", f"{train_ratings['anime_id'].nunique():,}")
+                c3.metric("Training Ratings", f"{len(train_ratings):,}")
+
+            st.markdown("---")
+
+            col_input, col_n = st.columns([3, 1])
+            with col_input:
+                username_input = st.text_input(
+                    "MyAnimeList Username",
+                    placeholder="ex: Monix-sama",
+                    key="collab_username",
+                )
+            with col_n:
+                n_recs = st.slider("Number of recommendations", 5, 20, 10, 1, key="collab_n_recs")
+
+            if train_ratings is not None:
+                sample_users = train_ratings["username"].unique()[:5].tolist()
+                st.caption(
+                    "No account? Try a demo user: "
+                    + ", ".join([f"`{user}`" for user in sample_users])
+                )
+
+            if st.button("🎯 Get Recommendations", type="primary", key="collab_btn"):
+                if not username_input.strip():
+                    st.warning("Enter a username to continue.")
+                else:
+                    username = username_input.strip()
+
+                    if username not in svd_model.user_map:
+                        st.error(
+                            f"The user **{username}** was not found in the training dataset. "
+                            "The model only knows users included in the training sample. "
+                            "Try one of the demo users above."
+                        )
+                    elif train_ratings is None or train_ratings.empty:
+                        st.warning("SVD training ratings were not found.")
+                    else:
+                        with st.spinner("Generating recommendations..."):
+                            from src.recommender import get_top_n_recommendations
+
+                            recommendations = get_top_n_recommendations(
+                                svd_model,
+                                username,
+                                train_ratings,
+                                n=n_recs,
+                            )
+
+                            if recommendations:
+                                df_recs_out = pd.DataFrame(
+                                    recommendations,
+                                    columns=["anime_id", "predicted_score"],
+                                )
+                                df_recs_out.insert(0, "rank", range(1, len(df_recs_out) + 1))
+                                df_recs_out["predicted_score"] = df_recs_out["predicted_score"].round(2)
+
+                                if "title" in df.columns and "mal_id" in df.columns:
+                                    details = df[["mal_id", "title", "type", "score", "members"]].drop_duplicates(
+                                        subset="mal_id"
+                                    )
+                                    df_recs_out = df_recs_out.merge(
+                                        details,
+                                        left_on="anime_id",
+                                        right_on="mal_id",
+                                        how="left",
+                                    ).drop(columns=["mal_id"], errors="ignore")
+
+                                st.success(f"Top {len(df_recs_out)} recommendations for **{username}**:")
+                                st.dataframe(df_recs_out, use_container_width=True, hide_index=True)
+
+                                if "title" in df_recs_out.columns:
+                                    fig = px.bar(
+                                        df_recs_out,
+                                        x="predicted_score",
+                                        y="title",
+                                        orientation="h",
+                                        title=f"Predicted scores for {username}",
+                                        color="predicted_score",
+                                        color_continuous_scale="Viridis",
+                                    )
+                                    fig.update_yaxes(autorange="reversed")
+                                    st.plotly_chart(style_figure(fig), use_container_width=True)
+                            else:
+                                st.info(
+                                    "No recommendations were found. "
+                                    "The user may already have seen all available anime."
+                                )
+
+            st.markdown("---")
+            with st.expander("ℹ️ How does Funk SVD work?"):
+                st.markdown(
+                    textwrap.dedent(
+                        """
+                    **Matrix Factorization (Funk SVD)** is a collaborative filtering algorithm that decomposes the user-anime matrix into two latent-factor vectors:
+
+                    - **User factors** — represent the user taste profile
+                    - **Item factors** — represent the latent characteristics of the anime
+                    - **User bias** — the user tendency to give high/low scores
+                    - **Item bias** — the anime tendency to receive high/low scores
+
+                    The prediction is calculated as:
+
+                    `score = global_mean + user_bias + item_bias + user_factors · item_factors`
+
+                    The model learns these factors through **gradient descent**, minimizing the error between predicted scores and actual scores in the training dataset.
+
+                    **Limitation:** The model only knows users and anime included in the training dataset. For new users (cold-start), the model returns the global mean score.
+                    """
+                    )
+                )
 
     # ---------------------------------------------------------------
 

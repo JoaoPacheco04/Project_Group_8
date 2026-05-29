@@ -7,7 +7,7 @@ The main supervised learning target is `score` from `datasets/ratings.csv`. This
 A secondary classification target is derived from the same feature:
 
 ```text
-high_score = 1 if score >= 8 else 0
+high_score = 1 if score >= 7 else 0
 ```
 
 This derived target allows the project to apply classification algorithms such as Logistic Regression and Naive Bayes while keeping the learning problem connected to the original dataset.
@@ -16,7 +16,7 @@ This derived target allows the project to apply classification algorithms such a
 
 The primary goal is prediction: estimate the expected anime score from available features such as user/anime identifiers and engineered numeric/categorical variables.
 
-The secondary goal is classification: identify whether an anime-user rating belongs to the high-score class (`score >= 8`) or lower-score class (`score < 8`).
+The secondary goal is classification: identify whether an anime-user rating belongs to the high-score class (`score >= 7`) or lower-score class (`score < 7`).
 
 ## Models Applied
 
@@ -27,7 +27,7 @@ Regression models used for score prediction:
 - Linear Regression
 - Ridge Regression
 - Lasso Regression
-- SVM/SVR with linear, RBF, and polynomial kernels
+- SVM/SVR with linear, RBF, and polynomial kernels. Polynomial SVR is kept in the baseline benchmark to satisfy the multiple-kernel analysis, but excluded from the SVD comparison if it becomes numerically unstable.
 - K-NN Regressor
 - Decision Tree Regressor
 - Random Forest Regressor
@@ -94,7 +94,7 @@ SVM is evaluated with multiple kernels:
 - RBF
 - Polynomial
 
-For regression, these are implemented as `SVR_linear`, `SVR_rbf`, and `SVR_poly`. For classification, these are implemented as `SVC_linear`, `SVC_rbf`, and `SVC_poly`.
+For regression, these are implemented as `SVR_linear`, `SVR_rbf`, and `SVR_poly`. If polynomial SVR produces unstable predictions outside the natural 0-10 score range after SVD, it is excluded only from the SVD plots and interpreted as evidence that kernel choice affects both performance and numerical stability. For classification, these are implemented as `SVC_linear`, `SVC_rbf`, and `SVC_poly`.
 
 The comparison shows whether a linear boundary is sufficient or whether nonlinear kernels better capture the relation between dataset features and score behavior.
 
