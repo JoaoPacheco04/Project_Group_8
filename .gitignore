@@ -6,7 +6,5 @@ notebooks/mlruns/
 mlflow.db
 notebooks/mlflow.db
 
-artifacts/
-reports/
 
 scratch/

@@ -1,0 +1,10 @@
+{
+  "best_n_neighbors": 29,
+  "best_weights": "uniform",
+  "metrics": {
+    "accuracy": 0.75297,
+    "precision": 0.7503202205166566,
+    "recall": 0.9954187058183795,
+    "f1": 0.8556637783451846
+  }
+}

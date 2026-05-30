@@ -1,0 +1,16 @@
+{
+  "classification_features": [
+    "username",
+    "anime_id",
+    "status",
+    "is_rewatching",
+    "num_watched_episodes"
+  ],
+  "regression_features": [
+    "username",
+    "anime_id",
+    "status",
+    "is_rewatching",
+    "num_watched_episodes"
+  ]
+}

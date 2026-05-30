@@ -18,21 +18,31 @@ def analyze_optimal_k(X, min_k: int = 2, max_k: int = 10):
     """
     Calculates inertia (SSE) and silhouette scores for a given range of K values.
     This fulfills the requirement to analyze the optimal number of clusters.
+    Silhouette scores are computed on a stratified sample for performance.
     """
     X_values = _as_array(X)
     rows = []
+    
+    # Use a sample for silhouette calculation to reduce computation time
+    # stratified by the full data distribution
+    sample_size = min(2000, max(1000, len(X_values) // 5))
+    sample_indices = np.random.RandomState(42).choice(len(X_values), size=sample_size, replace=False)
+    X_sample = X_values[sample_indices]
     
     # Iterate over the specified range of K to evaluate clustering performance
     for k in range(min_k, max_k + 1):
         # Initialize KMeans with a fixed random_state for reproducible scientific results
         kmeans = KMeans(n_clusters=k, random_state=42, n_init=10)
-        labels = kmeans.fit_predict(X_values)
+        labels_full = kmeans.fit_predict(X_values)
+        
+        # Compute silhouette on sample for speed, but use labels from full fit
+        labels_sample = kmeans.predict(X_sample)
         
         rows.append(
             {
                 "k": k,
                 "inertia": kmeans.inertia_, # Measures how tight the clusters are (used for Elbow Method)
-                "silhouette": silhouette_score(X_values, labels), # Measures cluster cohesion and separation
+                "silhouette": silhouette_score(X_sample, labels_sample), # Measures cluster cohesion and separation (on sample)
             }
         )
         

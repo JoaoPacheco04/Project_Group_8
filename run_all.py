@@ -39,11 +39,29 @@ ARTIFACTS_DIR = "artifacts" # Directory for serialized models and JSON logs
 EXPERIMENT_NAME = "Projeto_Grupo_8"
 SAMPLE_SIZE = 500000        # Downsampling limit to keep execution times reasonable
 RECOMMENDER_SAMPLE_SIZE = 20000
+KNN_GRID_SAMPLE_SIZE = 10000
 RANDOM_STATE = 42           # Fixed seed to ensure reproducible scientific results
 
 # Blacklist specifically slow models from exhaustive hyperparameter optimization
 SKIP_OPTIMIZATION = ["SVC_linear", "SVC_rbf", "SVC_poly", "MLPClassifier_single", "MLPClassifier_multi"]
-SKIP_REGRESSION_OPTIMIZATION = ["SVR_linear", "SVR_rbf", "SVR_poly", "MLP_single", "MLP_multi"]
+SKIP_REGRESSION_OPTIMIZATION = [
+    "SVR_linear",
+    "SVR_rbf",
+    "SVR_poly",
+    "MLP_single",
+    "MLP_multi",
+    "RandomForest",
+    "GradientBoosting",
+]
+SKIP_CLASSIFICATION_OPTIMIZATION = [
+    "SVC_linear",
+    "SVC_rbf",
+    "SVC_poly",
+    "MLPClassifier_single",
+    "MLPClassifier_multi",
+    "RandomForestClassifier",
+    "GradientBoostingClassifier",
+]
 
 # Define explicit data types to optimize memory usage during pandas loading
 RATING_DTYPES = {
@@ -404,14 +422,20 @@ def main():
         # KNN Optimization (explaining optimal number of neighbors)
         knn_pipeline = make_pipeline(df, target, models["KNN"])
         knn_grid = {"model__n_neighbors": list(range(3, 32, 2)), "model__weights": ["uniform", "distance"]}
+        if len(X_train_df) > KNN_GRID_SAMPLE_SIZE:
+            knn_sample = X_train_df.sample(n=KNN_GRID_SAMPLE_SIZE, random_state=RANDOM_STATE)
+            y_knn_sample = y_train.loc[knn_sample.index]
+        else:
+            knn_sample = X_train_df
+            y_knn_sample = y_train
         knn_grid_search = GridSearchCV(
             knn_pipeline,
             knn_grid,
-            cv=5,
+            cv=3,
             scoring="neg_mean_squared_error",
             n_jobs=1,
         )
-        knn_grid_search.fit(X_train_df, y_train)
+        knn_grid_search.fit(knn_sample, y_knn_sample)
         best_knn = knn_grid_search.best_estimator_
         knn_metrics = evaluate_model("KNN_grid", best_knn, X_test_df, y_test)
         
@@ -506,7 +530,7 @@ def main():
                 make_pipeline(df, target, model),
                 X_train_df,
                 y_train,
-                n_trials=10,
+                n_trials=5,
                 cv=3,
                 scoring="neg_mean_squared_error",
             )
@@ -629,11 +653,20 @@ def main():
         
         # GridSearch specific to KNN Classifier
         knn_clf_grid = {"n_neighbors": list(range(3, 32, 2)), "weights": ["uniform", "distance"]}
+        if len(Xc_train) > KNN_GRID_SAMPLE_SIZE:
+            rng = np.random.default_rng(RANDOM_STATE)
+            knn_clf_idx = rng.choice(len(Xc_train), size=KNN_GRID_SAMPLE_SIZE, replace=False)
+            Xc_knn_sample = Xc_train[knn_clf_idx]
+            yc_knn_sample = yc_train.iloc[knn_clf_idx]
+        else:
+            Xc_knn_sample = Xc_train
+            yc_knn_sample = yc_train
         best_knn_clf = grid_search(
             clf_models["KNNClassifier"],
             knn_clf_grid,
-            Xc_train,
-            yc_train,
+            Xc_knn_sample,
+            yc_knn_sample,
+            cv=3,
             scoring="f1",
         )
         clf_models["KNNClassifier"] = best_knn_clf
@@ -723,7 +756,7 @@ def main():
     with mlflow.start_run(run_name="greedy_search_classification"):
         greedy_classification_results = []
         for name, model in get_models("classification").items():
-            if name in SKIP_OPTIMIZATION:
+            if name in SKIP_CLASSIFICATION_OPTIMIZATION:
                 print(f"Skipping {name} - too slow for optimization")
                 continue
             tuned_model, search_info = greedy_search(
@@ -761,7 +794,7 @@ def main():
     with mlflow.start_run(run_name="optuna_search_classification"):
         optuna_classification_results = []
         for name, model in get_models("classification").items():
-            if name in SKIP_OPTIMIZATION:
+            if name in SKIP_CLASSIFICATION_OPTIMIZATION:
                 print(f"Skipping {name} - too slow for optimization")
                 continue
             tuned_model, search_info = optuna_study(
@@ -773,7 +806,7 @@ def main():
                 ),
                 X_class_df,
                 y_class,
-                n_trials=10,
+                n_trials=5,
                 cv=3,
                 scoring="f1",
             )

@@ -1090,7 +1090,7 @@ else:
             st.dataframe(FEATURE_DEFINITIONS, use_container_width=True, hide_index=True)
 
     # ---- Prediction Tab -----------------------------------------------------------
-    with user_tab5:
+    with tab_pred:
         st.subheader("🔮 Anime Score Prediction")
         if ml_bundle["score_model"] is None:
             st.info("Run `python run_all.py` to train and export the dashboard prediction artifacts.")
@@ -1125,46 +1125,21 @@ else:
                     col2.metric("Confidence", f"{confidence*100:.0f}%", delta=None)
 
                     # Show similar animes
-                    similar = get_similar_animes(filtered_df, pred, selected_title, top_n=5)
+                    similar = get_similar_animes(df, pred, selected_title, top_n=5)
                     if not similar.empty:
                         st.subheader("🎬 Similar Animes (by predicted score)")
                         st.dataframe(similar, use_container_width=True, hide_index=True)
                     else:
-                        st.info("No similar animes found in current filters.")
+                        st.info("No similar animes found.")
                 except Exception as exc:
                     st.error(f"Prediction failed: {exc}")
 
             # Batch predictions download
             st.markdown("---")
             st.subheader("📥 Batch Predictions")
-            st.caption("Export predictions for all filtered animes")
+            st.info("Batch predictions not available — the regression model uses user-specific features (watch status, episodes watched) that are not available in the anime metadata dataset.")
 
-            if st.button("Generate Batch Predictions", key="batch_pred_button"):
-                try:
-                    batch_results = create_batch_predictions(
-                        filtered_df[regression_features + ["title", "score", "type", "members"]].copy(),
-                        ml_bundle["score_model"],
-                        None,
-                        regression_features
-                    )
-
-                    if not batch_results.empty:
-                        st.success(f"✅ Predictions generated for {len(batch_results)} animes")
-                        st.dataframe(batch_results, use_container_width=True, hide_index=True)
-
-                        # Download button
-                        csv = batch_results.to_csv(index=False)
-                        st.download_button(
-                            label="📥 Download as CSV",
-                            data=csv,
-                            file_name="anime_predictions.csv",
-                            mime="text/csv",
-                            key="download_batch_csv"
-                        )
-                except Exception as exc:
-                    st.error(f"Batch prediction failed: {exc}")
-
-    with user_tab6:
+    with tab_clf:
         st.subheader("High Score Classification")
         if ml_bundle["classification_model"] is None or ml_bundle["classification_preprocess"] is None:
             st.info("Run `python run_all.py` or `notebooks/07_classification.ipynb` to train and export the dashboard classification artifacts.")
@@ -1216,7 +1191,7 @@ else:
                 except Exception as exc:
                     st.error(f"Classification failed: {exc}")
 
-    with user_tab7:
+    with tab_models:
         st.subheader("🤖 Model Results")
         mr1, mr2, mr3, mr4, mr5 = st.tabs([
             "📊 Regression", "🎯 Classification", "📐 Alpha Analysis", "🔢 KNN Optimal K", "🌳 Trees"
@@ -1287,7 +1262,7 @@ else:
             if df_a is None:
                 st.info("Run `python run_all.py` to generate alpha_analysis.csv")
             else:
-                st.caption("Alpha baixo = menos regularização. Alpha alto = mais shrinkage.")
+                st.caption("Low alpha = less regularization. High alpha = more coefficient shrinkage.")
                 fig = px.line(df_a, x="alpha", y="rmse", color="model", markers=True, title="RMSE vs Alpha - Ridge vs Lasso", log_x=True, color_discrete_map={"Ridge": COLOR_ACCENT_2, "Lasso": COLOR_ACCENT})
                 st.plotly_chart(style_figure(fig), use_container_width=True)
                 l, r = st.columns(2)
@@ -1438,7 +1413,7 @@ else:
                     except Exception as e:
                         st.warning(f"Error computing residuals: {e}")
 
-    with user_tab8:
+    with tab_rec:
         st.subheader("🎯 Anime Recommendations")
         st.markdown("Discover new anime based on the characteristics of an anime you already like (Content-Based Filtering).")
 
@@ -1456,13 +1431,14 @@ else:
 
             if st.button("💡 Generate Recommendations", type="primary"):
                 with st.spinner("Searching for similar anime..."):
-                    recommendations_df = get_anime_recommendations(filtered_df, selected_anime_rec, top_n=rec_top_n)
+                    # Utilizamos o 'df' (dataset completo) para garantir que temos sempre animes para recomendar
+                    recommendations_df = get_anime_recommendations(df, selected_anime_rec, top_n=rec_top_n)
 
                     if not recommendations_df.empty:
                         st.success(f"Here are the top {len(recommendations_df)} anime similar to **{selected_anime_rec}**:")
                         st.dataframe(recommendations_df, use_container_width=True, hide_index=True)
                     else:
-                        st.warning("Not enough recommendations were found with the current filters. Try widening the sidebar filters.")
+                        st.warning("Not enough recommendations were found. Try selecting a different anime.")
         else:
             st.info("No anime is available for the current filter settings.")
 
@@ -1494,26 +1470,20 @@ else:
 
             col_input, col_n = st.columns([3, 1])
             with col_input:
-                username_input = st.text_input(
-                    "MyAnimeList Username",
-                    placeholder="ex: Monix-sama",
-                    key="collab_username",
+                user_options = train_ratings["username"].unique().tolist() if train_ratings is not None else []
+                username_input = st.selectbox(
+                    "Seleciona um utilizador:",
+                    options=user_options,
+                    key="collab_username"
                 )
             with col_n:
                 n_recs = st.slider("Number of recommendations", 5, 20, 10, 1, key="collab_n_recs")
 
-            if train_ratings is not None:
-                sample_users = train_ratings["username"].unique()[:5].tolist()
-                st.caption(
-                    "No account? Try a demo user: "
-                    + ", ".join([f"`{user}`" for user in sample_users])
-                )
-
             if st.button("🎯 Get Recommendations", type="primary", key="collab_btn"):
-                if not username_input.strip():
-                    st.warning("Enter a username to continue.")
+                if not username_input or not str(username_input).strip():
+                    st.warning("Select a username to continue.")
                 else:
-                    username = username_input.strip()
+                    username = str(username_input).strip()
 
                     if username not in svd_model.user_map:
                         st.error(
