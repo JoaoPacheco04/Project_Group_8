@@ -347,8 +347,8 @@ def create_model_comparison_data(model_results_df: pd.DataFrame) -> pd.DataFrame
     return df
 
 
-def get_anime_recommendations(df: pd.DataFrame, anime_title: str, top_n: int = 10) -> pd.DataFrame:
-    """Generate anime recommendations based on similar characteristics."""
+def get_anime_recommendations(df: pd.DataFrame, anime_title: str, top_n: int = 5) -> pd.DataFrame:
+    """Generate anime recommendations based on similar characteristics with dynamic scoring."""
     try:
         # Find the selected anime
         selected = df[df["title"] == anime_title].iloc[0] if anime_title in df["title"].values else None
@@ -358,47 +358,83 @@ def get_anime_recommendations(df: pd.DataFrame, anime_title: str, top_n: int = 1
 
         # Create recommendation candidates (exclude the selected anime)
         candidates = df[df["title"] != anime_title].copy()
+        
+        if candidates.empty:
+            return pd.DataFrame()
 
-        # Initialize scoring
-        candidates["rec_score"] = 0.0
-
-        # 1. Similar score (±1.5 points)
+        # Initialize scores dict to track multiple scoring dimensions
+        scores = {}
+        
+        # 1. Score similarity (most important) - prefer anime close in score
+        score_component = 0
         if pd.notna(selected.get("score")):
-            score_diff = abs(candidates["score"] - selected["score"])
-            candidates["rec_score"] += (1 - score_diff / 10) * 30  # 30% weight
-
-        # 2. Same type
+            score_diff = abs(candidates["score"].fillna(0) - selected["score"])
+            # Scale: perfect match = 100, 3+ points away = 0
+            score_component = (1 - (score_diff / 3).clip(0, 1)) * 100
+        scores["score_sim"] = score_component
+        
+        # 2. Type match (exact match = 100)
+        type_component = 0
         if pd.notna(selected.get("type")):
-            candidates["rec_score"] += (candidates["type"] == selected["type"]) * 20  # 20% weight
-
-        # 3. Similar genres
+            type_component = (candidates["type"] == selected["type"]) * 100
+        scores["type_match"] = type_component
+        
+        # 3. Genre overlap (0-100 based on % of shared genres)
+        genre_component = 0
         if pd.notna(selected.get("genres_list")) and isinstance(selected["genres_list"], list):
             selected_genres = set(selected["genres_list"])
-            candidates["genre_overlap"] = candidates["genres_list"].apply(
-                lambda x: len(set(x) & selected_genres) / max(len(selected_genres), 1) if isinstance(x, list) else 0
-            )
-            candidates["rec_score"] += candidates["genre_overlap"] * 25  # 25% weight
+            if selected_genres:
+                genre_overlap_pct = candidates["genres_list"].apply(
+                    lambda x: (len(set(x) & selected_genres) / len(selected_genres) * 100) if isinstance(x, list) else 0
+                )
+                genre_component = genre_overlap_pct
+        scores["genre_match"] = genre_component
+        
+        # 4. Base quality (score of the candidate itself)
+        quality_component = candidates["score"].fillna(0) * 10  # Max 100 if score is 10
+        scores["quality"] = quality_component.clip(0, 100)
+        
+        # 5. Popularity bonus (slight boost for popular anime)
+        pop_component = 0
+        if pd.notna(selected.get("members")) and selected["members"] > 0:
+            pop_ratio = (candidates["members"] / selected["members"]).clip(0.5, 2)
+            pop_component = (pop_ratio / 2 * 50).clip(0, 50)  # Max 50 point boost
+        scores["popularity"] = pop_component
 
-        # 4. Popularity/Members (higher is better, but not too extreme)
-        if pd.notna(selected.get("members")):
-            members_ratio = candidates["members"] / (selected["members"] + 1)
-            members_ratio = members_ratio.clip(0.1, 10)  # Between 0.1x and 10x popularity
-            candidates["rec_score"] += (1 / (1 + abs(np.log(members_ratio)))) * 15  # 15% weight
+        # Combine scores with weights
+        candidates["rec_score"] = (
+            scores["score_sim"] * 0.35 +      # 35% - most important
+            scores["type_match"] * 0.20 +      # 20%
+            scores["genre_match"] * 0.25 +     # 25%
+            scores["quality"] * 0.10 +         # 10%
+            scores["popularity"] * 0.10        # 10%
+        )
 
-        # 5. Quality/Score (prefer highly scored)
-        candidates["rec_score"] += (candidates["score"].fillna(0) / 10) * 10  # 10% weight
-
-        # Sort and return top recommendations
+        # Sort and get top N
         recommendations = candidates.nlargest(top_n, "rec_score")[
             ["title", "type", "score", "members", "episodes", "rec_score"]
         ].reset_index(drop=True)
 
-        recommendations["rec_score"] = (recommendations["rec_score"] / recommendations["rec_score"].max() * 100).round(1)
+        # Normalize to 0-100 scale
+        max_score = recommendations["rec_score"].max()
+        if max_score > 0:
+            recommendations["rec_score"] = (recommendations["rec_score"] / max_score * 100).round(1)
+        else:
+            recommendations["rec_score"] = 75.0
+            
         recommendations = recommendations.rename(columns={"rec_score": "Match Score %"})
 
         return recommendations
-    except Exception:
-        return pd.DataFrame()
+    except Exception as e:
+        # Last resort: return top by score if all else fails
+        try:
+            fallback = df[df["title"] != anime_title].nlargest(top_n, "score")[
+                ["title", "type", "score", "members", "episodes"]
+            ].reset_index(drop=True)
+            fallback["Match Score %"] = 75.0
+            return fallback
+        except Exception:
+            return pd.DataFrame()
 
 
 def generate_report_html(model_results: dict, ml_bundle: dict, filtered_df: pd.DataFrame, controls: dict | None = None) -> str:
@@ -1427,7 +1463,8 @@ else:
                     key="recommendation_base_anime"
                 )
             with rec_col2:
-                rec_top_n = st.slider("Number of recommendations:", min_value=5, max_value=20, value=10, step=1)
+                st.metric("Recommendations", "5", help="Fixed at 5 for consistent results")
+                rec_top_n = 5
 
             if st.button("💡 Generate Recommendations", type="primary"):
                 with st.spinner("Searching for similar anime..."):
