@@ -11,6 +11,7 @@ from ml.inference import (
     get_similar_animes, extract_feature_importance, get_anime_recommendations,
     generate_report_html
 )
+from data.loader import get_regression_residual_source
 
 def render_developer_view(filtered_df: pd.DataFrame, scaled_df: pd.DataFrame, df: pd.DataFrame):
     st.title("🛠️ Technical & Statistical Analysis")
@@ -505,34 +506,38 @@ def render_full_analysis_tab(model_results: dict, ml_bundle: dict, filtered_df: 
 
     with fa4:
         st.markdown("#### Residual Analysis - Regression")
-        st.caption("Based on a 500-anime sample for performance.")
+        st.caption("Based on a 500-row sample for performance.")
         if ml_bundle["score_model"] is None:
             st.info("Run `python run_all.py` first.")
         else:
             reg_features = ml_bundle["feature_columns"].get("regression_features", [])
             if reg_features:
                 try:
-                    valid_scores = filtered_df.dropna(subset=["score"])
-                    sample = valid_scores.sample(min(500, len(valid_scores)), random_state=42)
-                    X = sample[reg_features].fillna(sample[reg_features].mean(numeric_only=True))
-                    y_actual = sample["score"].values
-                    y_pred = ml_bundle["score_model"].predict(X)
-                    residuals = y_actual - y_pred
-                    valid = ~np.isnan(residuals)
-                    r, ya, yp = residuals[valid], y_actual[valid], y_pred[valid]
-                    s1, s2, s3, s4 = st.columns(4)
-                    s1.metric("Mean Error", f"{r.mean():.4f}")
-                    s2.metric("Std Dev", f"{r.std():.4f}")
-                    s3.metric("RMSE", f"{np.sqrt(np.mean(r**2)):.4f}")
-                    s4.metric("Max |Error|", f"{np.abs(r).max():.4f}")
-                    l, ri = st.columns(2)
-                    with l:
-                        fig = px.histogram({"Residuals": r}, x="Residuals", nbins=30, title="Residual Distribution", color_discrete_sequence=[COLOR_ACCENT_2])
-                        st.plotly_chart(style_figure(fig), use_container_width=True)
-                    with ri:
-                        scat = pd.DataFrame({"Actual": ya, "Predicted": yp, "Error": r})
-                        fig2 = px.scatter(scat, x="Actual", y="Predicted", color="Error", title="Actual vs Predicted", color_continuous_scale="RdBu")
-                        st.plotly_chart(style_figure(fig2), use_container_width=True)
+                    residual_source, source_label = get_regression_residual_source(filtered_df, reg_features)
+                    if residual_source.empty:
+                        st.info("Residual analysis needs `ratings.csv` or matching regression features in the active dataset.")
+                    else:
+                        sample = residual_source.sample(min(500, len(residual_source)), random_state=42)
+                        X = sample[reg_features].copy()
+                        y_actual = sample["score"].values
+                        y_pred = ml_bundle["score_model"].predict(X)
+                        residuals = y_actual - y_pred
+                        valid = ~np.isnan(residuals)
+                        r, ya, yp = residuals[valid], y_actual[valid], y_pred[valid]
+                        st.caption(f"Residuals computed from: {source_label}.")
+                        s1, s2, s3, s4 = st.columns(4)
+                        s1.metric("Mean Error", f"{r.mean():.4f}")
+                        s2.metric("Std Dev", f"{r.std():.4f}")
+                        s3.metric("RMSE", f"{np.sqrt(np.mean(r**2)):.4f}")
+                        s4.metric("Max |Error|", f"{np.abs(r).max():.4f}")
+                        l, ri = st.columns(2)
+                        with l:
+                            fig = px.histogram({"Residuals": r}, x="Residuals", nbins=30, title="Residual Distribution", color_discrete_sequence=[COLOR_ACCENT_2])
+                            st.plotly_chart(style_figure(fig), use_container_width=True)
+                        with ri:
+                            scat = pd.DataFrame({"Actual": ya, "Predicted": yp, "Error": r})
+                            fig2 = px.scatter(scat, x="Actual", y="Predicted", color="Error", title="Actual vs Predicted", color_continuous_scale="RdBu")
+                            st.plotly_chart(style_figure(fig2), use_container_width=True)
                 except Exception as e:
                     st.warning(f"Error computing residuals: {e}")
 

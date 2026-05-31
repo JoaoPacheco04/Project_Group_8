@@ -6,6 +6,7 @@ CURRENT_YEAR = 2026
 DATA_DIR = Path(__file__).resolve().parent / "datasets"
 DETAILS_PATH = DATA_DIR / "details.csv"
 STATS_PATH = DATA_DIR / "stats.csv"
+RATINGS_PATH = DATA_DIR / "ratings.csv"
 ARTIFACTS_DIR = Path(__file__).resolve().parent / "artifacts"
 
 # Dark Theme Colors
@@ -44,6 +45,15 @@ DURATION_MAP = {
     "TV Short": 5,
     "CM": 1,
     "PV": 2,
+}
+
+RATING_MODEL_DTYPES = {
+    "username": "category",
+    "anime_id": "int32",
+    "status": "category",
+    "score": "float32",
+    "is_rewatching": "float32",
+    "num_watched_episodes": "float32",
 }
 
 TOP_STUDIOS = [

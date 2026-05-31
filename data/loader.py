@@ -3,7 +3,13 @@ import pandas as pd
 import streamlit as st
 
 from config import (
-    DETAILS_PATH, STATS_PATH, CURRENT_YEAR, TOP_STUDIOS_LOWER, DURATION_MAP
+    DETAILS_PATH,
+    STATS_PATH,
+    RATINGS_PATH,
+    RATING_MODEL_DTYPES,
+    CURRENT_YEAR,
+    TOP_STUDIOS_LOWER,
+    DURATION_MAP,
 )
 from utils.helpers import (
     parse_list_column, safe_ratio, categorize_era, encode_source, categorize_binge
@@ -74,6 +80,33 @@ def build_scaled_dataframe(df_source: pd.DataFrame, columns: list[str]) -> pd.Da
         else:
             scaled[f"{col}_zscore"] = 0.0
     return scaled
+
+@st.cache_data(show_spinner=False)
+def load_rating_model_data() -> pd.DataFrame:
+    """Load the ratings feature space used by regression/classification models."""
+    if not RATINGS_PATH.exists():
+        return pd.DataFrame()
+
+    ratings = pd.read_csv(RATINGS_PATH, dtype=RATING_MODEL_DTYPES)
+    ratings = ratings[ratings["score"] > 0]
+    ratings = ratings[ratings["num_watched_episodes"] <= 10000]
+    ratings = ratings[ratings["num_watched_episodes"] >= 0]
+    return ratings.reset_index(drop=True)
+
+def get_regression_residual_source(
+    anime_df: pd.DataFrame,
+    regression_features: list[str],
+) -> tuple[pd.DataFrame, str]:
+    """Return rows containing the regression features and target score."""
+    if regression_features and set(regression_features).issubset(anime_df.columns):
+        return anime_df.dropna(subset=["score"]).copy(), "filtered anime sample"
+
+    ratings_df = load_rating_model_data()
+    required_columns = ["score", *regression_features]
+    if ratings_df.empty or not set(required_columns).issubset(ratings_df.columns):
+        return pd.DataFrame(), "ratings.csv"
+
+    return ratings_df.dropna(subset=["score"]).copy(), "ratings sample"
 
 def filter_dataframe(df_source: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, object], bool]:
     valid_scores = df_source["score"].dropna()

@@ -1,6 +1,7 @@
 import json
 import os
 import time
+import warnings
 from pathlib import Path
 
 import joblib
@@ -9,6 +10,7 @@ import mlflow
 import mlflow.sklearn
 import numpy as np
 import pandas as pd
+from sklearn.exceptions import ConvergenceWarning
 from sklearn.model_selection import GridSearchCV, cross_val_score, train_test_split
 from sklearn.pipeline import Pipeline
 from sklearn.tree import plot_tree
@@ -30,6 +32,9 @@ from src.pca_svd import apply_pca
 from src.preprocessing import build_preprocess, get_preprocess_feature_names
 from src.recommender import SimpleSVD, get_top_n_recommendations
 from src.train import evaluate_model, train_and_log
+
+warnings.filterwarnings("ignore", category=ConvergenceWarning)
+warnings.filterwarnings("ignore", category=UserWarning)
 
 # =============================================================================
 # GLOBAL CONFIGURATION
@@ -469,6 +474,50 @@ def main():
         plot_alpha_analysis(alpha_df[alpha_df["model"] == "Lasso"], "Lasso", "rmse", lasso_alpha_plot)
         mlflow.log_artifact(lasso_alpha_plot)
 
+        # Combined Ridge vs Lasso alpha analysis for the dashboard/report
+        combined_alpha_plot = os.path.join(ARTIFACTS_DIR, "alpha_analysis.png")
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
+
+        ridge_data = alpha_df[alpha_df["model"] == "Ridge"].sort_values("alpha")
+        ax1.plot(ridge_data["alpha"], ridge_data["rmse"], marker="o", linewidth=2)
+        best_ridge_alpha = ridge_data.loc[ridge_data["rmse"].idxmin()]
+        ax1.annotate(
+            f"RMSE={best_ridge_alpha['rmse']:.4f}",
+            xy=(best_ridge_alpha["alpha"], best_ridge_alpha["rmse"]),
+            xytext=(10, 10),
+            textcoords="offset points",
+            fontsize=9,
+        )
+        ax1.set_xscale("log")
+        ax1.set_title("Ridge alpha analysis")
+        ax1.set_xlabel("alpha (log scale)")
+        ax1.set_ylabel("RMSE")
+        ax1.grid(True, alpha=0.3)
+        ax1.legend([f"Best alpha={best_ridge_alpha['alpha']:g}"])
+
+        lasso_data = alpha_df[alpha_df["model"] == "Lasso"].sort_values("alpha")
+        ax2.plot(lasso_data["alpha"], lasso_data["rmse"], marker="o", linewidth=2)
+        best_lasso_alpha = lasso_data.loc[lasso_data["rmse"].idxmin()]
+        ax2.annotate(
+            f"RMSE={best_lasso_alpha['rmse']:.4f}",
+            xy=(best_lasso_alpha["alpha"], best_lasso_alpha["rmse"]),
+            xytext=(10, 10),
+            textcoords="offset points",
+            fontsize=9,
+        )
+        ax2.set_xscale("log")
+        ax2.set_title("Lasso alpha analysis")
+        ax2.set_xlabel("alpha (log scale)")
+        ax2.set_ylabel("RMSE")
+        ax2.grid(True, alpha=0.3)
+        ax2.legend([f"Best alpha={best_lasso_alpha['alpha']:g}"])
+
+        plt.suptitle("Ridge and Lasso alpha analysis", fontsize=13, fontweight="bold")
+        plt.tight_layout()
+        plt.savefig(combined_alpha_plot, dpi=150, bbox_inches="tight")
+        plt.close()
+        mlflow.log_artifact(combined_alpha_plot)
+
         knn_summary_path = os.path.join(ARTIFACTS_DIR, "knn_best_result.json")
         save_json(
             knn_summary_path,
@@ -567,7 +616,24 @@ def main():
     X_test_red = svd.transform(X_test)
     models_svd = get_models_for_svd("regression")
 
+    cumulative_variance_path = os.path.join(ARTIFACTS_DIR, "cumulative_variance_svd.png")
+    cumvar = np.cumsum(svd.explained_variance_ratio_)
+    plt.figure(figsize=(8, 5))
+    plt.plot(range(1, len(cumvar) + 1), cumvar, marker="o", linewidth=2)
+    plt.axhline(y=0.95, color="r", linestyle="--", label="95% target")
+    plt.xlabel("Number of components")
+    plt.ylabel("Cumulative explained variance")
+    plt.title("Cumulative explained variance - TruncatedSVD")
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(cumulative_variance_path, dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"  SVD components selected: {len(cumvar)}")
+    print(f"  Explained variance: {cumvar[-1]:.4f}")
+
     with mlflow.start_run(run_name="pca_models"):
+        mlflow.log_artifact(cumulative_variance_path)
         pca_results = []
         for name, model in models_svd.items():
             fitted, fit_time = train_and_log(f"{name}_svd", model, X_train_red, y_train)
@@ -914,7 +980,8 @@ def main():
     # =========================================================================
     # FINAL EXPORTS & ARTIFACT MANAGEMENT
     # =========================================================================
-    joblib.dump(preprocess, os.path.join(ARTIFACTS_DIR, "preprocess.pkl"))
+    preprocess_regression_path = os.path.join(ARTIFACTS_DIR, "preprocess_regression.pkl")
+    joblib.dump(preprocess, preprocess_regression_path)
     joblib.dump(preprocess_class, os.path.join(ARTIFACTS_DIR, "preprocess_classification.pkl"))
 
     if not isinstance(best_score_model, Pipeline) or "preprocess" not in best_score_model.named_steps:
@@ -935,7 +1002,7 @@ def main():
     )
 
     with mlflow.start_run(run_name="model_artifacts"):
-        mlflow.log_artifact(os.path.join(ARTIFACTS_DIR, "preprocess.pkl"))
+        mlflow.log_artifact(preprocess_regression_path)
         mlflow.log_artifact(os.path.join(ARTIFACTS_DIR, "preprocess_classification.pkl"))
         mlflow.log_artifact(os.path.join(ARTIFACTS_DIR, "best_score_model.pkl"))
         mlflow.log_artifact(os.path.join(ARTIFACTS_DIR, "best_classification_model.pkl"))
@@ -943,8 +1010,10 @@ def main():
 
         # Export representative Random Forest Tree for the paper
         try:
-            rf_model = best_score_model.named_steps["model"]
-            rf_feature_names = get_preprocess_feature_names(best_score_model.named_steps["preprocess"])
+            rf_pipeline = make_pipeline(df, target, models["RandomForest"])
+            rf_pipeline.fit(X_train_df, y_train)
+            rf_model = rf_pipeline.named_steps["model"]
+            rf_feature_names = get_preprocess_feature_names(rf_pipeline.named_steps["preprocess"])
             export_random_forest_tree(
                 rf_model,
                 os.path.join(ARTIFACTS_DIR, "rf_tree.dot"),
