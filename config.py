@@ -1,37 +1,79 @@
-"""
-Script to apply remaining dashboard.py edits that multi_replace can't handle
-due to Windows CRLF line endings.
-"""
+import pandas as pd
 from pathlib import Path
 
-p = Path("dashboard.py")
-content = p.read_bytes().decode("utf-8")
+CURRENT_YEAR = 2026
+# Assuming app.py is at the root, so __file__ resolves to Project_Group_8/config.py
+DATA_DIR = Path(__file__).resolve().parent / "datasets"
+DETAILS_PATH = DATA_DIR / "details.csv"
+STATS_PATH = DATA_DIR / "stats.csv"
+ARTIFACTS_DIR = Path(__file__).resolve().parent / "artifacts"
 
-# ── 1. Remove the confusing user_tab5–8 alias line ──────────────────────────
-old = (
-    "    user_tab1, user_tab2, user_tab3, user_tab4 = tab_cat, tab_time, tab_eng, tab_exp\r\n"
-    "    user_tab5, user_tab6, user_tab7, user_tab8 = tab_pred, tab_clf, tab_models, tab_rec\r\n"
+# Dark Theme Colors
+COLOR_BG = "#0f0f1a"
+COLOR_SURFACE = "#1a1a2e"
+COLOR_TEXT = "#e0e0e0"
+COLOR_MUTED = "#a0a0c0"
+COLOR_ACCENT = "#e94560"
+COLOR_ACCENT_2 = "#4ecdc4"
+COLOR_ACCENT_3 = "#a855f7"
+
+ERA_ORDER = [
+    "Classic (Pre-2000)",
+    "Golden Age (2000-2010)",
+    "Modern (2011-2020)",
+    "Current (2021+)",
+    "Unknown",
+]
+
+BINGE_ORDER = [
+    "Quick Watch (< 2h)",
+    "Weekend Watch (2-5h)",
+    "Week Binge (5-13h)",
+    "Standard Series (13-50h)",
+    "Long Commitment (50+ h)",
+    "Unknown",
+]
+
+DURATION_MAP = {
+    "TV": 24,
+    "Movie": 90,
+    "OVA": 25,
+    "ONA": 25,
+    "Special": 20,
+    "Music": 4,
+    "TV Short": 5,
+    "CM": 1,
+    "PV": 2,
+}
+
+TOP_STUDIOS = [
+    "Madhouse",
+    "Ufotable",
+    "Kyoto Animation",
+    "MAPPA",
+    "Bones",
+    "Studio Ghibli",
+    "Wit Studio",
+    "Production I.G",
+]
+TOP_STUDIOS_LOWER = {studio.lower() for studio in TOP_STUDIOS}
+
+FEATURE_DEFINITIONS = pd.DataFrame(
+    [
+        {"Feature": "Engagement_Ratio", "Definition": "favorites / members", "Meaning": "Share of members who marked the anime as favourite."},
+        {"Feature": "Hype_vs_Action_Ratio", "Definition": "scored_by / members", "Meaning": "How many list members actually submitted a score."},
+        {"Feature": "Completion_Ratio", "Definition": "completed / total", "Meaning": "Share of tracked users who completed the anime."},
+        {"Feature": "Backlog_Ratio", "Definition": "plan_to_watch / total", "Meaning": "Share of tracked users who still have the anime in backlog."},
+        {"Feature": "Drop_Rate", "Definition": "dropped / total", "Meaning": "Share of tracked users who dropped the anime."},
+        {"Feature": "Popularity_to_Age_Ratio", "Definition": "members / Anime_Age_Years", "Meaning": "Approximate popularity gained per year."},
+        {"Feature": "Binge_Category", "Definition": "Categorised from estimated watch time", "Meaning": "Estimated viewing commitment based on type and episode count."},
+    ]
 )
-new = (
-    "    user_tab1, user_tab2, user_tab3, user_tab4 = tab_cat, tab_time, tab_eng, tab_exp\r\n"
-)
-assert old in content, "Alias block not found!"
-content = content.replace(old, new, 1)
-print("[OK] Removed user_tab5-8 alias line")
 
-# ── 2. Replace CSS block ─────────────────────────────────────────────────────
-old_css_start = "st.markdown(\r\n    f\"\"\"\r\n    <style>\r\n        .stApp"
-old_css_end   = "    unsafe_allow_html=True,\r\n)\r\n\r\n# ─────────────────────────────────────────\r\n#  HELPER FUNCTIONS"
+SCALING_COLUMNS = ["score", "members", "favorites", "episodes", "Engagement_Ratio", "Completion_Ratio", "Drop_Rate"]
 
-assert old_css_start in content, "CSS start not found!"
-assert old_css_end   in content, "CSS end not found!"
-
-# Find the block boundaries
-start_idx = content.index(old_css_start)
-end_idx   = content.index(old_css_end)
-
-new_css = '''st.markdown(
-    f"""
+# Combined and Enhanced CSS from patch_dashboard.py
+GLOBAL_CSS = f"""
     <style>
         /* Base */
         .stApp {{ background-color: {COLOR_BG}; color: {COLOR_TEXT}; }}
@@ -133,27 +175,4 @@ new_css = '''st.markdown(
             margin-bottom: 1rem;
         }}
     </style>
-    """,
-    unsafe_allow_html=True,
-)\r\n\r\n# -----------------------------------------\r\n#  HELPER FUNCTIONS'''
-
-content = content[:start_idx] + new_css + content[end_idx + len(old_css_end):]
-print("[OK] CSS block replaced with enhanced version")
-
-p.write_bytes(content.encode("utf-8"))
-print("[OK] dashboard.py saved")
-
-# Verify
-content_check = p.read_text(encoding="utf-8")
-checks = [
-    "rgba(233,69,96,0.15)",
-    "linear-gradient(135deg",
-    "box-shadow: 0 4px 14px",
-    "user_tab5" not in content_check,  # should be gone
-]
-all_ok = all(checks)
-print(f"Verification: {'PASS' if all_ok else 'FAIL'}")
-print(f"  Tab hover CSS present: {'rgba(233,69,96,0.15)' in content_check}")
-print(f"  Button gradient present: {'linear-gradient(135deg' in content_check}")
-print(f"  Metric shadow present: {'box-shadow: 0 4px 14px' in content_check}")
-print(f"  user_tab5 removed: {'user_tab5' not in content_check}")
+"""
