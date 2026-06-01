@@ -1,4 +1,5 @@
 import json
+import os
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -7,6 +8,85 @@ from datetime import datetime
 
 from config import ARTIFACTS_DIR
 from utils.helpers import parse_list_column
+
+# ---------------------------------------------------------------------------
+# Fix for Streamlit ≥ 1.37:  joblib.load() spawns worker threads for parallel
+# de-serialization of scikit-learn models.  Those threads do NOT carry
+# Streamlit's ScriptRunContext, which causes a "missing ScriptRunContext"
+# warning/error.  We suppress the loky CPU-count warning and patch joblib's
+# thread pool so each worker inherits the current script-run context.
+# ---------------------------------------------------------------------------
+os.environ.setdefault("LOKY_MAX_CPU_COUNT", str(os.cpu_count() or 4))
+
+try:
+    from streamlit.runtime.scriptrunner import add_script_run_ctx, get_script_run_ctx
+    _HAS_SCRIPT_RUN_CTX = True
+except ImportError:
+    _HAS_SCRIPT_RUN_CTX = False
+
+_original_joblib_load = joblib.load
+
+
+def _safe_joblib_load(filename, **kwargs):
+    """Wrapper around joblib.load that propagates ScriptRunContext to worker
+    threads so Streamlit ≥ 1.37 doesn't raise/warn about a missing context."""
+    if _HAS_SCRIPT_RUN_CTX:
+        ctx = get_script_run_ctx()
+        _orig_start = None
+        import threading
+
+        _orig_start = threading.Thread.start
+
+        def _patched_start(self_thread, *a, **kw):
+            _orig_start(self_thread, *a, **kw)
+            if ctx is not None:
+                add_script_run_ctx(self_thread, ctx)
+
+        threading.Thread.start = _patched_start  # type: ignore[assignment]
+        try:
+            return _original_joblib_load(filename, **kwargs)
+        finally:
+            threading.Thread.start = _orig_start  # type: ignore[assignment]
+    else:
+        return _original_joblib_load(filename, **kwargs)
+
+
+# ---------------------------------------------------------------------------
+# Fix for sklearn version mismatch:  SimpleImputer objects pickled with an
+# older scikit-learn lack the `_fill_dtype` attribute that sklearn ≥ 1.8
+# requires during `.transform()`.  We walk through all nested estimators
+# after loading and back-fill the attribute from the fitted `statistics_`.
+# ---------------------------------------------------------------------------
+def _patch_imputer_fill_dtype(estimator):
+    """Recursively patch SimpleImputer instances that are missing `_fill_dtype`."""
+    from sklearn.impute import SimpleImputer
+
+    if isinstance(estimator, SimpleImputer) and not hasattr(estimator, "_fill_dtype"):
+        if hasattr(estimator, "statistics_") and estimator.statistics_ is not None:
+            estimator._fill_dtype = estimator.statistics_.dtype
+        elif estimator.strategy in ("mean", "median"):
+            estimator._fill_dtype = np.dtype("float64")
+        else:
+            estimator._fill_dtype = np.dtype("O")
+
+    # Walk Pipeline steps
+    if hasattr(estimator, "steps"):
+        for _name, step in estimator.steps:
+            if step is not None and step != "drop":
+                _patch_imputer_fill_dtype(step)
+
+    # Walk ColumnTransformer transformers
+    if hasattr(estimator, "transformers_"):
+        for _name, trans, _cols in estimator.transformers_:
+            if trans is not None and trans != "drop" and not isinstance(trans, str):
+                _patch_imputer_fill_dtype(trans)
+
+    # Walk named_steps (another way to access pipeline internals)
+    if hasattr(estimator, "named_steps"):
+        for step in estimator.named_steps.values():
+            if step is not None and step != "drop":
+                _patch_imputer_fill_dtype(step)
+
 
 @st.cache_resource(show_spinner=False)
 def load_ml_artifacts():
@@ -37,14 +117,17 @@ def load_ml_artifacts():
     }
 
     if paths["score_model"].exists():
-        artifacts["score_model"] = joblib.load(paths["score_model"])
+        artifacts["score_model"] = _safe_joblib_load(paths["score_model"])
+        _patch_imputer_fill_dtype(artifacts["score_model"])
 
     if paths["classification_model"].exists() and paths["classification_preprocess"].exists():
-        artifacts["classification_model"] = joblib.load(paths["classification_model"])
-        artifacts["classification_preprocess"] = joblib.load(paths["classification_preprocess"])
+        artifacts["classification_model"] = _safe_joblib_load(paths["classification_model"])
+        _patch_imputer_fill_dtype(artifacts["classification_model"])
+        artifacts["classification_preprocess"] = _safe_joblib_load(paths["classification_preprocess"])
+        _patch_imputer_fill_dtype(artifacts["classification_preprocess"])
 
     if paths["svd_model"].exists():
-        artifacts["svd_model"] = joblib.load(paths["svd_model"])
+        artifacts["svd_model"] = _safe_joblib_load(paths["svd_model"])
 
     if paths["svd_train_ratings"].exists():
         artifacts["svd_train_ratings"] = pd.read_csv(paths["svd_train_ratings"])
